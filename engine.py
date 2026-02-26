@@ -22,6 +22,18 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from apscheduler.schedulers.blocking import BlockingScheduler
 
+# Redis for shared state between engine and dashboard
+import redis as redis_lib
+REDIS_URL  = os.environ.get("REDIS_URL", "")          # set in Render env vars
+REDIS_KEY  = "nyztrade:state"
+_redis_client = None
+
+def _get_redis():
+    global _redis_client
+    if _redis_client is None and REDIS_URL:
+        _redis_client = redis_lib.from_url(REDIS_URL, decode_responses=True)
+    return _redis_client
+
 # ══════════════════════════════════════════════════════════════════════════════
 # LOGGING
 # ══════════════════════════════════════════════════════════════════════════════
@@ -107,22 +119,42 @@ def _default_state() -> dict:
 
 def load_state() -> dict:
     s = _default_state()
+    # Try Redis first
+    r = _get_redis()
+    if r:
+        try:
+            raw = r.get(REDIS_KEY)
+            if raw:
+                s.update(json.loads(raw))
+                return s
+        except Exception as e:
+            log.warning(f"Redis load error: {e}")
+    # Fallback to local file
     if os.path.exists(STATE_FILE):
         try:
             with open(STATE_FILE) as f:
                 s.update(json.load(f))
         except Exception as e:
-            log.warning(f"State load error: {e}")
+            log.warning(f"State file load error: {e}")
     return s
 
 def save_state(s: dict):
+    data = json.dumps(s, default=str)
+    # Save to Redis (primary)
+    r = _get_redis()
+    if r:
+        try:
+            r.set(REDIS_KEY, data)
+        except Exception as e:
+            log.error(f"Redis save error: {e}")
+    # Also save local file as backup
     try:
         tmp = STATE_FILE + ".tmp"
         with open(tmp, "w") as f:
-            json.dump(s, f, indent=2, default=str)
+            f.write(data)
         os.replace(tmp, STATE_FILE)
     except Exception as e:
-        log.error(f"State save error: {e}")
+        log.error(f"State file save error: {e}")
 
 def push_signal_log(s: dict, msg: str, level: str = "INFO"):
     ts = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
