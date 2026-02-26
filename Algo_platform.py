@@ -1,7 +1,6 @@
 """
-NYZTrade · SMC Algo Platform
-Live Trading Engine | Dhan Broker | Carry Forward + Intraday Options
-Built for NIYAS — NYZTrade
+NYZTrade SMC Liquidity Lens Backtester
+Index Options Backtest | Dhan API | Built for NIYAS
 """
 
 import streamlit as st
@@ -9,14 +8,9 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from datetime import datetime, timedelta
 import requests
-import json
 import time
-import math
-import threading
-from datetime import datetime, timedelta, date
-from dataclasses import dataclass, field, asdict
-from typing import Optional
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -24,1314 +18,1547 @@ warnings.filterwarnings("ignore")
 # PAGE CONFIG
 # ══════════════════════════════════════════════════════════════════════════════
 st.set_page_config(
-    page_title="NYZTrade · Algo Platform",
-    page_icon="🚀",
+    page_title="NYZTrade | SMC Liquidity Lens",
+    page_icon="📡",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
 st.markdown("""
 <style>
-  .main { background-color: #0a0d14; }
-  section[data-testid="stSidebar"] { background: #0e1117; border-right: 1px solid #1e2130; }
-  div[data-testid="metric-container"] {
-      background: #131720; border-radius: 8px;
-      padding: 14px 16px; border: 1px solid #1e2130;
-  }
-  .sidebar-hdr {
-      font-size: 0.68rem; font-weight: 800; text-transform: uppercase;
-      letter-spacing: 0.12em; color: #555; margin-top: 1.2rem; margin-bottom: 0.3rem;
-  }
-  .status-live   { background:#0d2b1a; border:1px solid #00d4aa; border-radius:6px; padding:8px 14px; color:#00d4aa; font-weight:700; }
-  .status-flat   { background:#1a1d29; border:1px solid #444;    border-radius:6px; padding:8px 14px; color:#888; }
-  .status-paused { background:#2b1d0a; border:1px solid #f5a623; border-radius:6px; padding:8px 14px; color:#f5a623; font-weight:700; }
-  .leg-card      { background:#131720; border:1px solid #1e2130; border-radius:8px; padding:12px; margin-bottom:8px; }
-  .pnl-pos { color:#00d4aa; font-weight:700; font-size:1.3rem; }
-  .pnl-neg { color:#ff4b6e; font-weight:700; font-size:1.3rem; }
-  .order-card    { background:#131720; border:1px solid #1e2130; border-radius:6px; padding:10px 14px; margin-bottom:6px; font-size:0.85rem; }
-  .stTabs [data-baseweb="tab"] { background:#131720; border-radius:6px; border:1px solid #1e2130; }
-  .stTabs [aria-selected="true"] { background:#0052cc; }
-  hr { border-color: #1e2130 !important; }
+    .main { background-color: #0e1117; }
+    div[data-testid="metric-container"] {
+        background: #1a1d29; border-radius: 8px;
+        padding: 12px; border: 1px solid #2d3139;
+    }
+    .sidebar-header {
+        font-size: 0.72rem; font-weight: 700; text-transform: uppercase;
+        letter-spacing: 0.1em; color: #666;
+        margin-top: 1.2rem; margin-bottom: 0.3rem;
+    }
+    .token-box {
+        background: #1a1d29; border: 1px solid #2d3139;
+        border-radius: 8px; padding: 12px; margin-bottom: 10px;
+    }
+    .stTabs [data-baseweb="tab"] {
+        background: #1a1d29; border-radius: 6px; border: 1px solid #2d3139;
+    }
+    .stTabs [aria-selected="true"] { background: #0052cc; }
 </style>
 """, unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
-# CONSTANTS
+# DHAN CONFIG — identical pattern to GEX Dashboard
+# Update access_token daily. client_id never changes.
 # ══════════════════════════════════════════════════════════════════════════════
-DHAN_BASE = "https://api.dhan.co/v2"
 
-INDICES = {
-    "NIFTY 50":   {"security_id": "13",  "lot_size": 75,  "strike_gap": 50,  "symbol": "NIFTY"},
-    "BANKNIFTY":  {"security_id": "25",  "lot_size": 30,  "strike_gap": 100, "symbol": "BANKNIFTY"},
-    "FINNIFTY":   {"security_id": "27",  "lot_size": 65,  "strike_gap": 50,  "symbol": "FINNIFTY"},
-    "MIDCPNIFTY": {"security_id": "442", "lot_size": 75,  "strike_gap": 25,  "symbol": "MIDCPNIFTY"},
-    "SENSEX":     {"security_id": "1",   "lot_size": 10,  "strike_gap": 100, "symbol": "SENSEX"},
-    "BANKEX":     {"security_id": "12",  "lot_size": 15,  "strike_gap": 100, "symbol": "BANKEX"},
-}
+from dataclasses import dataclass
 
-PRODUCT_TYPES = {
-    "Intraday (MIS)":         "INTRADAY",
-    "Carry Forward (CNC/NRML)": "CNC",
-    "Margin (MTF)":           "MTF",
-}
-
-ORDER_TYPES = {
-    "Market":         "MARKET",
-    "Limit":          "LIMIT",
-    "Stop Loss":      "STOP_LOSS",
-    "SL-Market":      "STOP_LOSS_MARKET",
-}
-
-EXCHANGE_MAP = {
-    "NIFTY 50": "NSE", "BANKNIFTY": "NSE", "FINNIFTY": "NSE",
-    "MIDCPNIFTY": "NSE", "SENSEX": "BSE", "BANKEX": "BSE",
-}
-
-# ══════════════════════════════════════════════════════════════════════════════
-# DHAN CONFIG
-# ══════════════════════════════════════════════════════════════════════════════
 @dataclass
 class DhanConfig:
     client_id:    str = "1100480354"
-    access_token: str = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzUxMiJ9.eyJpc3MiOiJkaGFuIiwicGFydG5lcklkIjoiIiwiZXhwIjoxNzcyMTY3OTgxLCJhcHBfaWQiOiJjOTNkM2UwOSIsImlhdCI6MTc3MjA4MTU4MSwidG9rZW5Db25zdW1lclR5cGUiOiJBUFAiLCJ3ZWJob29rVXJsIjoiIiwiZGhhbkNsaWVudElkIjoiMTEwMDQ4MDM1NCJ9.Kry8jyKMhIR-f1H5R0a2A4I9UHnWdDDE3LMmnXgOiE2U5pXWP3P0Scohw4j4IPvBPy3bPienE2vrWdU78bdJ0w"   # ← update daily
+    access_token: str = "paste_your_token_here"   # ← paste fresh token here daily
+
+DHAN_BASE = "https://api.dhan.co/v2"
+
+INDICES = {
+    "NIFTY 50":   {"security_id": 13,  "lot_size": 75,  "strike_gap": 50},
+    "BANKNIFTY":  {"security_id": 25,  "lot_size": 30,  "strike_gap": 100},
+    "FINNIFTY":   {"security_id": 27,  "lot_size": 65,  "strike_gap": 50},
+    "MIDCPNIFTY": {"security_id": 442, "lot_size": 75,  "strike_gap": 25},
+    "SENSEX":     {"security_id": 1,   "lot_size": 10,  "strike_gap": 100},
+    "BANKEX":     {"security_id": 12,  "lot_size": 15,  "strike_gap": 100},
+}
+
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SESSION STATE INITIALISATION
+# DHAN FETCHER CLASS — mirrors GEX Dashboard's UnifiedOptionsFetcher exactly
+# No token passed anywhere. self.headers used on every request.
 # ══════════════════════════════════════════════════════════════════════════════
-def init_state():
-    defaults = {
-        "algo_running":      False,
-        "algo_paused":       False,
-        "positions":         [],         # list of open position dicts
-        "orders":            [],         # all order records
-        "trade_log":         [],         # closed trade records
-        "equity_curve":      [],         # (timestamp, equity) tuples
-        "initial_capital":   500_000.0,
-        "current_capital":   500_000.0,
-        "last_signal":       None,
-        "last_bar_ts":       None,
-        "signal_count":      0,
-        "error_log":         [],
-        "last_refresh":      None,
-        "strategy_params":   {},
-        "live_df":           None,
-        "carry_positions":   [],         # positions carried overnight
-    }
-    for k, v in defaults.items():
-        if k not in st.session_state:
-            st.session_state[k] = v
 
-init_state()
-
-# ══════════════════════════════════════════════════════════════════════════════
-# DHAN API LAYER
-# ══════════════════════════════════════════════════════════════════════════════
-class DhanAPI:
-    """Thin wrapper around Dhan REST API v2."""
-
+class DhanFetcher:
     def __init__(self, config: DhanConfig):
-        self.cfg = config
+        self.config = config
+        # Identical header structure to GEX Dashboard
         self.headers = {
             "access-token": config.access_token,
             "client-id":    config.client_id,
             "Content-Type": "application/json",
         }
+        self.base_url = DHAN_BASE
 
-    # ── Market Data ──────────────────────────────────────────────────────────
-    def get_quote(self, security_id: str, exchange: str = "NSE") -> dict | None:
-        """Fetch LTP for an instrument."""
-        try:
-            r = requests.post(
-                f"{DHAN_BASE}/marketfeed/ltp",
-                headers=self.headers,
-                json={"NSE_EQ": [security_id]} if exchange == "NSE" else {"BSE_EQ": [security_id]},
-                timeout=8
-            )
-            if r.ok:
-                return r.json()
-        except Exception as e:
-            self._log_error(f"get_quote: {e}")
-        return None
+    def _handle_error(self, r: requests.Response) -> None:
+        code, body = r.status_code, r.text[:400]
+        if code == 401:
+            st.error("❌ **401** — Token expired/invalid. Update `access_token` in DhanConfig and restart.")
+        elif code == 429:
+            st.error("❌ **429** — Rate limit hit. Wait 60 s and retry.")
+        elif code == 400:
+            st.error(f"❌ **400 Bad Request** — `{body}`")
+        else:
+            st.error(f"❌ **HTTP {code}** — `{body}`")
 
-    def get_index_quote(self, security_id: str) -> float | None:
-        """Get index LTP via marketfeed."""
-        try:
-            r = requests.post(
-                f"{DHAN_BASE}/marketfeed/ltp",
-                headers=self.headers,
-                json={"IDX_I": [security_id]},
-                timeout=8
-            )
-            if r.ok:
+    def fetch_index_ohlcv(self, security_id: int, from_date: str,
+                           to_date: str, interval: str,
+                           debug: bool = False) -> pd.DataFrame | None:
+        """
+        Fetch index OHLCV — same approach as GEX dashboard fetch_rolling_data.
+
+        Intraday (1/5/15/25/60):  POST /charts/intraday
+                                  exchangeSegment=IDX_I, instrument=INDEX
+                                  fromDate/toDate include time  HH:MM:SS
+
+        Daily (D):                POST /charts/historical
+                                  exchangeSegment=IDX_I, instrument=INDEX
+        """
+        # Dhan natively supports: 1, 5, 15, 25, 60
+        # 3-min and 10-min are fetched as 1-min and resampled client-side
+        RESAMPLE_MAP = {"3": ("1", 3), "10": ("1", 10)}
+        resample_to = None
+        fetch_interval = interval
+        if interval in RESAMPLE_MAP:
+            fetch_interval, resample_to = RESAMPLE_MAP[interval]
+
+        intraday_set = {"1", "5", "15", "25", "60"}
+
+        if fetch_interval in intraday_set:
+            from_dt    = datetime.strptime(from_date, "%Y-%m-%d")
+            to_dt      = datetime.strptime(to_date,   "%Y-%m-%d")
+            total_days = max((to_dt - from_dt).days, 1)
+            all_dfs, fetched = [], 0
+            prog = st.progress(0, text="Fetching intraday data…")
+            cur  = from_dt
+
+            while cur <= to_dt:
+                end = min(cur + timedelta(days=90), to_dt)
+                payload = {
+                    "securityId":      security_id,
+                    "exchangeSegment": "IDX_I",
+                    "instrument":      "INDEX",
+                    "interval":        interval,
+                    "fromDate":        cur.strftime("%Y-%m-%d") + " 09:15:00",
+                    "toDate":          end.strftime("%Y-%m-%d") + " 15:30:00",
+                }
+                if debug:
+                    st.write("📤 Intraday payload:", payload)
+                try:
+                    r = requests.post(f"{self.base_url}/charts/intraday",
+                                      headers=self.headers, json=payload, timeout=30)
+                    if debug:
+                        st.write(f"📥 Response {r.status_code}:", r.text[:600])
+                    if not r.ok:
+                        self._handle_error(r)
+                        prog.empty()
+                        return None
+                    data = r.json()
+                    if isinstance(data, dict) and "data" in data:
+                        data = data["data"]
+                    df = _parse_ohlcv(data)
+                    if df is not None:
+                        all_dfs.append(df)
+                except Exception as e:
+                    st.error(f"Request error: {e}")
+                    prog.empty()
+                    return None
+
+                fetched += max((end - cur).days, 1)
+                prog.progress(min(fetched / total_days, 1.0),
+                              text=f"Fetched {cur.date()} → {end.date()}")
+                cur = end + timedelta(days=1)
+                time.sleep(0.3)
+
+            prog.empty()
+            if not all_dfs:
+                st.warning("⚠️ No data returned. Try Daily timeframe or shorter date range.")
+                return None
+            return (pd.concat(all_dfs)
+                      .drop_duplicates("timestamp")
+                      .sort_values("timestamp")
+                      .reset_index(drop=True))
+
+        else:
+            payload = {
+                "securityId":      security_id,
+                "exchangeSegment": "IDX_I",
+                "instrument":      "INDEX",
+                "fromDate":        from_date,
+                "toDate":          to_date,
+                "expiryCode":      0,
+            }
+            if debug:
+                st.write("📤 Daily payload:", payload)
+            try:
+                r = requests.post(f"{self.base_url}/charts/historical",
+                                  headers=self.headers, json=payload, timeout=30)
+                if debug:
+                    st.write(f"📥 Response {r.status_code}:", r.text[:600])
+                if not r.ok:
+                    self._handle_error(r)
+                    return None
                 data = r.json()
-                for segment_data in data.get("data", {}).values():
-                    for sid, info in segment_data.items():
-                        ltp = info.get("last_price") or info.get("ltp")
-                        if ltp:
-                            return float(ltp)
-        except Exception as e:
-            self._log_error(f"get_index_quote: {e}")
-        return None
-
-    def fetch_ohlcv(self, security_id: str, from_date: str, to_date: str,
-                    interval: str = "5", is_index: bool = True) -> pd.DataFrame | None:
-        """Fetch historical OHLCV bars."""
-        payload = {
-            "securityId":      security_id,
-            "exchangeSegment": "IDX_I" if is_index else "NSE_EQ",
-            "instrument":      "INDEX"  if is_index else "EQUITY",
-            "interval":        interval,
-            "fromDate":        from_date,
-            "toDate":          to_date,
-        }
-        try:
-            r = requests.post(f"{DHAN_BASE}/charts/intraday",
-                              headers=self.headers, json=payload, timeout=20)
-            if not r.ok:
-                return None
-            data = r.json()
-            if not data.get("timestamp"):
-                return None
-            df = pd.DataFrame({
-                "timestamp": pd.to_datetime(data["timestamp"], unit="s", utc=True)
-                               .tz_convert("Asia/Kolkata").tz_localize(None),
-                "open":   pd.to_numeric(data["open"],   errors="coerce"),
-                "high":   pd.to_numeric(data["high"],   errors="coerce"),
-                "low":    pd.to_numeric(data["low"],    errors="coerce"),
-                "close":  pd.to_numeric(data["close"],  errors="coerce"),
-                "volume": pd.to_numeric(data["volume"], errors="coerce"),
-            }).dropna().sort_values("timestamp").reset_index(drop=True)
-            return df if not df.empty else None
-        except Exception as e:
-            self._log_error(f"fetch_ohlcv: {e}")
-        return None
-
-    def fetch_option_chain(self, symbol: str, expiry_date: str) -> dict | None:
-        """Fetch option chain for a symbol and expiry."""
-        try:
-            r = requests.get(
-                f"{DHAN_BASE}/optionchain",
-                headers=self.headers,
-                params={"UnderlyingScrip": symbol, "ExpiryDate": expiry_date},
-                timeout=15
-            )
-            if r.ok:
-                return r.json()
-        except Exception as e:
-            self._log_error(f"fetch_option_chain: {e}")
-        return None
-
-    # ── Order Management ──────────────────────────────────────────────────────
-    def place_order(self, order: dict) -> dict | None:
-        """Place an order. Returns response dict."""
-        try:
-            r = requests.post(
-                f"{DHAN_BASE}/orders",
-                headers=self.headers,
-                json=order,
-                timeout=10
-            )
-            resp = r.json() if r.content else {}
-            resp["_http_status"] = r.status_code
-            return resp
-        except Exception as e:
-            self._log_error(f"place_order: {e}")
-            return {"error": str(e), "_http_status": 0}
-
-    def modify_order(self, order_id: str, updates: dict) -> dict | None:
-        try:
-            r = requests.put(
-                f"{DHAN_BASE}/orders/{order_id}",
-                headers=self.headers,
-                json=updates,
-                timeout=10
-            )
-            return r.json() if r.content else {}
-        except Exception as e:
-            self._log_error(f"modify_order: {e}")
+                if isinstance(data, dict) and "data" in data:
+                    data = data["data"]
+                return _parse_ohlcv(data)
+            except Exception as e:
+                st.error(f"Request error: {e}")
             return None
 
-    def cancel_order(self, order_id: str) -> bool:
-        try:
-            r = requests.delete(
-                f"{DHAN_BASE}/orders/{order_id}",
-                headers=self.headers,
-                timeout=10
-            )
-            return r.ok
-        except Exception as e:
-            self._log_error(f"cancel_order: {e}")
-            return False
+    def fetch_rolling_option(self, security_id: int, strike_offset: int,
+                              opt_type: str, from_date: str, to_date: str,
+                              interval: str = "25", expiry_flag: str = "WEEK",
+                              debug: bool = False) -> pd.DataFrame | None:
+        """
+        Fetch real option OHLCV via /charts/rollingoption — chunked in 89-day windows
+        to avoid DH-905 (max 90 days per call).
+        opt_type: "CALL" or "PUT"
+        """
+        strike_str = "ATM" if strike_offset == 0 else (
+            f"ATM+{strike_offset}" if strike_offset > 0 else f"ATM{strike_offset}"
+        )
+        key = "ce" if opt_type == "CALL" else "pe"
 
-    def get_positions(self) -> list:
-        """Fetch all open positions from Dhan."""
-        try:
-            r = requests.get(f"{DHAN_BASE}/positions", headers=self.headers, timeout=10)
-            if r.ok:
-                return r.json().get("data", [])
-        except Exception as e:
-            self._log_error(f"get_positions: {e}")
-        return []
+        from_dt    = datetime.strptime(from_date, "%Y-%m-%d")
+        to_dt      = datetime.strptime(to_date,   "%Y-%m-%d")
+        total_days = max((to_dt - from_dt).days, 1)
+        all_dfs, fetched = [], 0
+        prog = st.progress(0, text=f"Fetching {strike_str} {opt_type} option data…")
+        cur  = from_dt
 
-    def get_orders(self) -> list:
-        """Fetch today's order book."""
-        try:
-            r = requests.get(f"{DHAN_BASE}/orders", headers=self.headers, timeout=10)
-            if r.ok:
-                return r.json().get("data", [])
-        except Exception as e:
-            self._log_error(f"get_orders: {e}")
-        return []
+        while cur <= to_dt:
+            end = min(cur + timedelta(days=89), to_dt)   # max 89 days per call (DH-905)
+            payload = {
+                "exchangeSegment": "NSE_FNO",
+                "interval":        interval,
+                "securityId":      security_id,
+                "instrument":      "OPTIDX",
+                "expiryFlag":      expiry_flag,
+                "expiryCode":      1,
+                "strike":          strike_str,
+                "drvOptionType":   opt_type,
+                "requiredData":    ["open", "high", "low", "close", "volume", "oi"],
+                "fromDate":        cur.strftime("%Y-%m-%d"),
+                "toDate":          end.strftime("%Y-%m-%d"),
+            }
+            if debug:
+                st.write(f"📤 Rolling option payload ({cur.date()} → {end.date()}):", payload)
+            try:
+                r = requests.post(f"{self.base_url}/charts/rollingoption",
+                                  headers=self.headers, json=payload, timeout=30)
+                if debug:
+                    st.write(f"📥 Response {r.status_code}:", r.text[:600])
+                if not r.ok:
+                    self._handle_error(r)
+                    prog.empty()
+                    return None
+                raw = r.json().get("data", {}).get(key, {})
+                if raw and raw.get("timestamp"):
+                    chunk = pd.DataFrame({
+                        "timestamp": pd.to_datetime(raw["timestamp"], unit="s", utc=True)
+                                       .tz_convert("Asia/Kolkata").tz_localize(None),
+                        "open":   pd.to_numeric(raw.get("open",   []), errors="coerce"),
+                        "high":   pd.to_numeric(raw.get("high",   []), errors="coerce"),
+                        "low":    pd.to_numeric(raw.get("low",    []), errors="coerce"),
+                        "close":  pd.to_numeric(raw.get("close",  []), errors="coerce"),
+                        "volume": pd.to_numeric(raw.get("volume", []), errors="coerce"),
+                        "oi":     pd.to_numeric(raw.get("oi", [np.nan]*len(raw["timestamp"])), errors="coerce"),
+                    }).dropna(subset=["close"])
+                    if not chunk.empty:
+                        all_dfs.append(chunk)
+            except Exception as e:
+                st.error(f"Rolling option chunk error: {e}")
+                prog.empty()
+                return None
 
-    def get_holdings(self) -> list:
-        """Fetch demat holdings (carry forward positions)."""
-        try:
-            r = requests.get(f"{DHAN_BASE}/holdings", headers=self.headers, timeout=10)
-            if r.ok:
-                return r.json().get("data", [])
-        except Exception as e:
-            self._log_error(f"get_holdings: {e}")
-        return []
+            fetched += max((end - cur).days, 1)
+            prog.progress(min(fetched / total_days, 1.0),
+                          text=f"Option data: {cur.date()} → {end.date()}")
+            cur = end + timedelta(days=1)
+            time.sleep(0.3)
 
-    def get_funds(self) -> dict | None:
-        """Fetch available margin / funds."""
-        try:
-            r = requests.get(f"{DHAN_BASE}/fundlimit", headers=self.headers, timeout=10)
-            if r.ok:
-                return r.json()
-        except Exception as e:
-            self._log_error(f"get_funds: {e}")
+        prog.empty()
+        if not all_dfs:
+            st.warning("⚠️ No option data returned for this strike/range.")
+            return None
+        return (pd.concat(all_dfs)
+                  .drop_duplicates("timestamp")
+                  .sort_values("timestamp")
+                  .reset_index(drop=True))
+
+
+# Module-level fetcher instance — uses hardcoded DhanConfig
+_fetcher = DhanFetcher(DhanConfig())
+
+
+def _parse_ohlcv(data: dict) -> pd.DataFrame | None:
+    if not data or "open" not in data or not data.get("timestamp"):
         return None
+    df = pd.DataFrame({
+        "timestamp": pd.to_datetime(data["timestamp"], unit="s", utc=True)
+                       .tz_convert("Asia/Kolkata").tz_localize(None),
+        "open":   pd.to_numeric(data["open"],   errors="coerce"),
+        "high":   pd.to_numeric(data["high"],   errors="coerce"),
+        "low":    pd.to_numeric(data["low"],    errors="coerce"),
+        "close":  pd.to_numeric(data["close"],  errors="coerce"),
+        "volume": pd.to_numeric(data["volume"], errors="coerce"),
+    }).dropna().sort_values("timestamp").reset_index(drop=True)
+    return df if not df.empty else None
 
-    def kill_switch(self) -> bool:
-        """Kill switch — cancel all open orders and square off all positions."""
-        # Cancel all open orders
-        orders = self.get_orders()
-        for o in orders:
-            if o.get("orderStatus") in ("PENDING", "TRANSIT", "PARTIALLY_FILLED"):
-                self.cancel_order(o.get("orderId", ""))
-        # Square off all positions
-        positions = self.get_positions()
-        success = True
-        for p in positions:
-            if int(p.get("netQty", 0)) != 0:
-                side = "SELL" if int(p["netQty"]) > 0 else "BUY"
-                order = {
-                    "dhanClientId":     self.cfg.client_id,
-                    "transactionType":  side,
-                    "exchangeSegment":  p.get("exchangeSegment", "NSE_FNO"),
-                    "productType":      p.get("productType", "CNC"),
-                    "orderType":        "MARKET",
-                    "validity":         "DAY",
-                    "securityId":       p.get("securityId", ""),
-                    "quantity":         abs(int(p["netQty"])),
-                    "price":            0,
-                    "triggerPrice":     0,
-                }
-                resp = self.place_order(order)
-                if not resp or resp.get("_http_status", 0) not in (200, 201):
-                    success = False
-        return success
-
-    def _log_error(self, msg: str):
-        ts = datetime.now().strftime("%H:%M:%S")
-        st.session_state["error_log"].append(f"[{ts}] {msg}")
-        if len(st.session_state["error_log"]) > 100:
-            st.session_state["error_log"] = st.session_state["error_log"][-100:]
 
 # ══════════════════════════════════════════════════════════════════════════════
-# INDICATORS  (reused from backtest app)
+# STRIKE UTILITIES
 # ══════════════════════════════════════════════════════════════════════════════
+
+def get_atm_strike(spot: float, strike_gap: int) -> int:
+    """Round spot to nearest strike_gap."""
+    return int(round(spot / strike_gap) * strike_gap)
+
+
+def get_strike_label(offset: int) -> str:
+    if offset == 0:   return "ATM"
+    if offset > 0:    return f"ATM+{offset}"
+    return f"ATM{offset}"
+
+
+def compute_strike_price(spot: float, strike_gap: int, offset: int) -> int:
+    """ATM + offset * strike_gap."""
+    atm = get_atm_strike(spot, strike_gap)
+    return atm + offset * strike_gap
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# INDICATORS
+# ══════════════════════════════════════════════════════════════════════════════
+
 def ema(s: pd.Series, p: int) -> pd.Series:
     return s.ewm(span=p, adjust=False).mean()
 
+
 def calc_bsp(df: pd.DataFrame, length: int) -> pd.Series:
-    hl = (df["high"] - df["low"]).replace(0, np.nan)
-    ad = ((2 * df["close"] - df["low"] - df["high"]) / hl) * df["volume"]
-    return (ad.rolling(length).sum() / df["volume"].rolling(length).sum()).fillna(0)
-
-def get_atm_strike(spot: float, gap: int) -> int:
-    return int(round(spot / gap) * gap)
-
-def get_strike_label(offset: int) -> str:
-    if offset == 0:  return "ATM"
-    if offset > 0:   return f"ATM+{offset}"
-    return f"ATM{offset}"
-
-def compute_strike(spot: float, gap: int, offset: int) -> int:
-    return get_atm_strike(spot, gap) + offset * gap
-
-def check_signals(df: pd.DataFrame, params: dict) -> dict:
     """
-    Compute latest bar signal from BSP + EMA.
-    Returns {"signal": 1/-1/0, "bsp": float, "ema20": float, ...}
+    BSP (Balance of Selling Pressure) — exact Pine Script translation.
+    Pine: ad = (close==high and close==low) or high==low ? 0 : ((2*close-low-high)/(high-low))*volume
+    mf  = sum(ad, length) / sum(volume, length)
     """
-    if df is None or len(df) < 50:
-        return {"signal": 0, "bsp": 0, "reason": "insufficient data"}
+    hl = df["high"] - df["low"]
+    flat = (hl == 0) | ((df["close"] == df["high"]) & (df["close"] == df["low"]))
+    ad   = np.where(flat, 0.0, ((2 * df["close"] - df["low"] - df["high"]) / hl.replace(0, 1.0)) * df["volume"])
+    ad   = pd.Series(ad, index=df.index)
+    vol_sum = df["volume"].rolling(length).sum()
+    return (ad.rolling(length).sum() / vol_sum).fillna(0)
 
+
+def calc_bsp_daily(df_intraday: pd.DataFrame, daily_df: pd.DataFrame, length: int) -> pd.Series:
+    """
+    Pine uses request.security(syminfo.tickerid, 'D', mf) — BSP is computed on
+    DAILY bars and then stamp-forwarded onto each intraday bar (same value all day).
+    This function replicates that: compute BSP on daily_df, then merge onto intraday.
+    """
+    if daily_df is None or daily_df.empty:
+        return calc_bsp(df_intraday, length)  # fallback to intraday BSP
+    # Compute on daily bars
+    hl = daily_df["high"] - daily_df["low"]
+    flat = (hl == 0) | ((daily_df["close"] == daily_df["high"]) & (daily_df["close"] == daily_df["low"]))
+    ad   = np.where(flat, 0.0,
+                    ((2 * daily_df["close"] - daily_df["low"] - daily_df["high"])
+                     / hl.replace(0, 1.0)) * daily_df["volume"])
+    ad   = pd.Series(ad, index=daily_df.index)
+    vol_sum = daily_df["volume"].rolling(length).sum()
+    daily_bsp = (ad.rolling(length).sum() / vol_sum).fillna(0)
+    daily_bsp.index = pd.to_datetime(daily_df["timestamp"].values).normalize()
+    # Stamp onto intraday bars by date
+    intra_dates = pd.to_datetime(df_intraday["timestamp"].values).normalize()
+    return pd.Series(intra_dates, index=df_intraday.index).map(
+        daily_bsp.to_dict()
+    ).ffill().fillna(0)
+
+
+def pivot_highs(df: pd.DataFrame, n: int) -> list[dict]:
+    out = []
+    for i in range(n, len(df) - n):
+        win = df["high"].iloc[i - n: i + n + 1]
+        if df["high"].iloc[i] == win.max():
+            out.append({"idx": i, "price": df["high"].iloc[i],
+                        "open": df["open"].iloc[i], "close": df["close"].iloc[i],
+                        "volume": df["volume"].iloc[i]})
+    return out
+
+
+def pivot_lows(df: pd.DataFrame, n: int) -> list[dict]:
+    out = []
+    for i in range(n, len(df) - n):
+        win = df["low"].iloc[i - n: i + n + 1]
+        if df["low"].iloc[i] == win.min():
+            out.append({"idx": i, "price": df["low"].iloc[i],
+                        "open": df["open"].iloc[i], "close": df["close"].iloc[i],
+                        "volume": df["volume"].iloc[i]})
+    return out
+
+
+def order_blocks(df: pd.DataFrame, ph: list, pl: list,
+                 vt: float = 1.5) -> list[dict]:
+    vsma = df["volume"].rolling(14).mean()
+    obs  = []
+    for p in ph:
+        i      = p["idx"]
+        strong = p["volume"] > vsma.iloc[i] * vt if pd.notna(vsma.iloc[i]) else False
+        end    = next((j for j in range(i + 1, len(df))
+                       if df["close"].iloc[j] > p["price"]), len(df) - 1)
+        obs.append({"type": "bearish", "top": p["price"],
+                    "btm": max(p["open"], p["close"]),
+                    "start": i, "end": end, "strong": strong})
+    for p in pl:
+        i      = p["idx"]
+        strong = p["volume"] > vsma.iloc[i] * vt if pd.notna(vsma.iloc[i]) else False
+        end    = next((j for j in range(i + 1, len(df))
+                       if df["close"].iloc[j] < p["price"]), len(df) - 1)
+        obs.append({"type": "bullish", "top": min(p["open"], p["close"]),
+                    "btm": p["price"],
+                    "start": i, "end": end, "strong": strong})
+    return obs
+
+
+def fair_value_gaps(df: pd.DataFrame) -> list[dict]:
+    fvgs = []
+    for i in range(2, len(df)):
+        if df["low"].iloc[i] > df["high"].iloc[i - 2]:
+            mid = (df["low"].iloc[i] + df["high"].iloc[i - 2]) / 2
+            if (df["low"].iloc[i] - df["high"].iloc[i - 2]) / mid > 0.001:
+                fvgs.append({"type": "bullish", "top": df["low"].iloc[i],
+                              "btm": df["high"].iloc[i - 2], "start": i - 2})
+        elif df["high"].iloc[i] < df["low"].iloc[i - 2]:
+            mid = (df["low"].iloc[i - 2] + df["high"].iloc[i]) / 2
+            if (df["low"].iloc[i - 2] - df["high"].iloc[i]) / mid > 0.001:
+                fvgs.append({"type": "bearish", "top": df["low"].iloc[i - 2],
+                              "btm": df["high"].iloc[i], "start": i - 2})
+    return fvgs
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# OPTION BACKTEST ENGINE
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _norm_cdf(x: float) -> float:
+    """Normal CDF using math.erf — no scipy needed."""
+    import math
+    return (1.0 + math.erf(x / math.sqrt(2.0))) / 2.0
+
+
+def black_scholes_price(S, K, T, r, sigma, option_type="CE"):
+    """Black-Scholes using pure math — no scipy."""
+    import math
+    if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
+        intrinsic = max(S - K, 0) if option_type in ("CE", "CALL") else max(K - S, 0)
+        return max(intrinsic, 0.05)
+    try:
+        d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
+        d2 = d1 - sigma * math.sqrt(T)
+        if option_type in ("CE", "CALL"):
+            return S * _norm_cdf(d1) - K * math.exp(-r * T) * _norm_cdf(d2)
+        else:
+            return K * math.exp(-r * T) * _norm_cdf(-d2) - S * _norm_cdf(-d1)
+    except Exception:
+        return 0.05
+
+
+def simulate_option_prices(df: pd.DataFrame, strike_offset: int,
+                            strike_gap: int, opt_type: str,
+                            dte: int = 7, iv: float = 0.15) -> pd.DataFrame:
+    """
+    Simulate option prices for each bar using Black-Scholes.
+    strike_offset: integer offset from ATM (e.g. 0=ATM, 1=ATM+1, -1=ATM-1)
+    """
     df = df.copy()
-    df["ema20"] = ema(df["close"], 20)
-    df["ema50"] = ema(df["close"], 50)
-    df["bsp"]   = calc_bsp(df, params.get("bsp_length", 21))
+    r  = 0.065  # RBI repo rate approx
+    prices = []
 
-    last = df.iloc[-1]
-    bsp  = float(last["bsp"])
-    e20  = float(last["ema20"])
-    e50  = float(last["ema50"])
-    cls  = float(last["close"])
+    for i, row in df.iterrows():
+        S = row["close"]
+        remaining_dte = max(dte - i * (dte / len(df)), 0.01)
+        T = remaining_dte / 365
+        K = compute_strike_price(S, strike_gap, strike_offset)
+        price = black_scholes_price(S, K, T, r, iv, opt_type)
+        prices.append({"strike": K, "opt_price": round(price, 2)})
 
-    buy_lvl  = params.get("bsp_buy_lvl", 0.08)
-    sell_lvl = params.get("bsp_sell_lvl", -0.08)
-    mode     = params.get("signal_mode", "Level Hold")
-    use_ema  = params.get("ema_filter", True)
+    opt_df = pd.DataFrame(prices, index=df.index)
+    df["strike"]    = opt_df["strike"]
+    df["opt_price"] = opt_df["opt_price"]
+    return df
 
-    bull = (cls > e20 and e20 > e50) if use_ema else True
-    bear = (cls < e20 and e20 < e50) if use_ema else True
 
-    prev_bsp = float(df["bsp"].iloc[-2]) if len(df) > 1 else 0
-
-    signal = 0
-    reason = "No signal"
-
-    if mode == "Flip":
-        if bsp > buy_lvl and prev_bsp <= buy_lvl and bull:
-            signal = 1;  reason = "BSP crossed above buy level"
-        elif bsp < sell_lvl and prev_bsp >= sell_lvl and bear:
-            signal = -1; reason = "BSP crossed below sell level"
-    elif mode == "Level Hold":
-        if bsp > buy_lvl and bull:
-            signal = 1;  reason = "BSP above buy level + bull trend"
-        elif bsp < sell_lvl and bear:
-            signal = -1; reason = "BSP below sell level + bear trend"
-        elif abs(bsp) < 0.01:
-            signal = 0;  reason = "BSP in neutral zone — exit signal"
-    else:  # BSP Only
-        if bsp > buy_lvl:
-            signal = 1;  reason = "BSP above buy level"
-        elif bsp < sell_lvl:
-            signal = -1; reason = "BSP below sell level"
-
-    return {
-        "signal":    signal,
-        "reason":    reason,
-        "bsp":       round(bsp, 4),
-        "ema20":     round(e20, 2),
-        "ema50":     round(e50, 2),
-        "close":     round(cls, 2),
-        "timestamp": last["timestamp"],
-    }
-
-# ══════════════════════════════════════════════════════════════════════════════
-# ORDER BUILDER
-# ══════════════════════════════════════════════════════════════════════════════
-def build_option_order(cfg: DhanConfig, index_name: str, spot: float,
-                       leg: dict, lots: int, side: str,
-                       product_type: str, order_type: str = "MARKET",
-                       limit_price: float = 0) -> dict:
+def generate_signals(df: pd.DataFrame, buy_lvl: float, sell_lvl: float,
+                      ema_filter: bool = True, signal_mode: str = "Pine Exact") -> pd.DataFrame:
     """
-    Build a Dhan order payload for one option leg.
-    leg: {"opt_type": "CALL"/"PUT", "offset": int, "strike_lbl": str, "lots": int}
-    side: "BUY" or "SELL"
-    product_type: "INTRADAY" or "CNC"
+    Signal modes:
+
+    Pine Exact  ← DEFAULT — exact replica of TradingView Pine Script logic:
+                  ENTRY: bsp > buyLevel AND close > ema20 AND ema20 > ema50
+                  EXIT:  bsp < sellLevel AND close < ema20 AND ema20 < ema50
+                  (strategy.entry BUY + strategy.close BUY — no shorts taken)
+
+    Level Hold  — entry while BSP sustained above level; exit at neutral BSP
+                  (more trades on long historical data)
+
+    Flip        — entry only on BSP level CROSS; exit only on cross below sell level
+
+    BSP Only    — no EMA filter, pure BSP threshold (most trades)
     """
-    idx_cfg   = INDICES[index_name]
-    lot_size  = idx_cfg["lot_size"]
-    strike_gap= idx_cfg["strike_gap"]
-    symbol    = idx_cfg["symbol"]
-    exchange  = EXCHANGE_MAP.get(index_name, "NSE")
-    seg       = "NSE_FNO" if exchange == "NSE" else "BSE_FNO"
+    df = df.copy()
 
-    strike    = compute_strike(spot, strike_gap, leg["offset"])
-    opt_suffix= "CE" if leg["opt_type"] == "CALL" else "PE"
-
-    # Dhan requires security_id for option — we use 0 as placeholder for market order
-    # In production, look up security_id from option chain
-    return {
-        "dhanClientId":    cfg.client_id,
-        "transactionType": side,
-        "exchangeSegment": seg,
-        "productType":     product_type,
-        "orderType":       order_type,
-        "validity":        "DAY",
-        "securityId":      "0",          # ← replace with real security_id from option chain
-        "tradingSymbol":   f"{symbol}{strike}{opt_suffix}",
-        "quantity":        lots * lot_size,
-        "price":           limit_price,
-        "triggerPrice":    0,
-        "disclosedQuantity": 0,
-        "afterMarketOrder":  False,
-        "_meta": {                       # internal metadata (not sent to Dhan)
-            "index":      index_name,
-            "spot":       spot,
-            "strike":     strike,
-            "opt_type":   leg["opt_type"],
-            "opt_suffix": opt_suffix,
-            "offset":     leg["offset"],
-            "strike_lbl": leg["strike_lbl"],
-            "lots":       lots,
-            "leg_lots":   leg.get("lots", 1),
-            "product":    product_type,
-        }
-    }
-
-def execute_spread(api: DhanAPI, index_name: str, spot: float,
-                   legs: list, scale_lots: int, side: str,
-                   product_type: str, order_type: str,
-                   dry_run: bool = True) -> list:
-    """
-    Execute all legs of a spread. Returns list of order responses.
-    dry_run=True: simulate without sending to Dhan.
-    """
-    responses = []
-    for leg in legs:
-        direction = leg["direction"]  # BUY/SELL per leg
-        # For exit, flip direction
-        actual_side = direction if side == "ENTER" else ("SELL" if direction == "BUY" else "BUY")
-        order = build_option_order(
-            api.cfg, index_name, spot, leg,
-            scale_lots * leg.get("lots", 1),
-            actual_side, product_type, order_type
-        )
-        meta = order.pop("_meta")
-        if dry_run:
-            resp = {
-                "orderId":   f"DRY-{int(time.time())}-{leg['strike_lbl']}",
-                "orderStatus": "SIMULATED",
-                "tradingSymbol": order["tradingSymbol"],
-                "quantity":  order["quantity"],
-                "side":      actual_side,
-                "_meta":     meta,
-                "_dry_run":  True,
-            }
-        else:
-            resp = api.place_order(order)
-            if resp:
-                resp["_meta"] = meta
-                resp["side"]  = actual_side
-        responses.append(resp)
-        time.sleep(0.15)  # 150ms between legs to avoid rate limits
-    return responses
-
-# ══════════════════════════════════════════════════════════════════════════════
-# POSITION TRACKER
-# ══════════════════════════════════════════════════════════════════════════════
-def open_position(responses: list, spot: float, signal_info: dict,
-                  product_type: str, legs: list) -> dict:
-    """Create a position record from order responses."""
-    return {
-        "id":           f"POS-{int(time.time())}",
-        "entry_time":   datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "entry_spot":   spot,
-        "signal":       signal_info.get("signal"),
-        "bsp_at_entry": signal_info.get("bsp"),
-        "reason":       signal_info.get("reason"),
-        "product_type": product_type,
-        "legs":         legs,
-        "orders":       responses,
-        "status":       "OPEN",
-        "carry_flag":   product_type == "CNC",
-        "mtm_pnl":      0.0,
-        "realized_pnl": 0.0,
-    }
-
-def update_mtm(position: dict, current_prices: dict) -> float:
-    """Compute mark-to-market P&L for an open position."""
-    total_pnl = 0.0
-    for resp in position.get("orders", []):
-        meta = resp.get("_meta", {})
-        key  = f"{meta.get('strike', '')}{meta.get('opt_suffix', '')}"
-        if key in current_prices:
-            current_price = current_prices[key]
-            entry_price   = meta.get("entry_price", 0)
-            qty           = meta.get("lots", 1) * INDICES.get(
-                meta.get("index", "NIFTY 50"), {}).get("lot_size", 75)
-            direction     = 1 if resp.get("side") == "BUY" else -1
-            total_pnl    += direction * (current_price - entry_price) * qty
-    return round(total_pnl, 2)
-
-# ══════════════════════════════════════════════════════════════════════════════
-# SIDEBAR — CONFIGURATION
-# ══════════════════════════════════════════════════════════════════════════════
-with st.sidebar:
-    st.markdown("## 🚀 NYZTrade Algo")
-    st.markdown('<div class="sidebar-hdr">🔐 Credentials</div>', unsafe_allow_html=True)
-
-    cfg = DhanConfig()
-    cfg.client_id    = st.text_input("Client ID",    value=cfg.client_id)
-    cfg.access_token = st.text_input("Access Token", value=cfg.access_token, type="password",
-                                     help="Paste today's token — regenerates daily from Dhan portal")
-    api = DhanAPI(cfg)
-
-    token_ok = cfg.access_token and cfg.access_token != "paste_your_token_here"
-    if token_ok:
-        st.success("✅ Token set")
+    # EMA trend conditions — shared by all modes
+    has_ema = "ema20" in df.columns and "ema50" in df.columns
+    if has_ema and ema_filter:
+        bull_trend = (df["close"] > df["ema20"]) & (df["ema20"] > df["ema50"])
+        bear_trend = (df["close"] < df["ema20"]) & (df["ema20"] < df["ema50"])
     else:
-        st.error("❌ Token not configured")
+        bull_trend = pd.Series(True, index=df.index)
+        bear_trend = pd.Series(True, index=df.index)
 
-    st.markdown('<div class="sidebar-hdr">📊 Instrument</div>', unsafe_allow_html=True)
-    index_name  = st.selectbox("Index", list(INDICES.keys()))
-    idx_cfg     = INDICES[index_name]
-    lot_size    = idx_cfg["lot_size"]
-    strike_gap  = idx_cfg["strike_gap"]
-    st.caption(f"Lot: **{lot_size}** · Strike gap: **{strike_gap}**")
+    bsp = df["bsp"]
 
-    intervals = {"1 Min":"1","3 Min":"3","5 Min":"5","15 Min":"15","25 Min":"25","Daily":"D"}
-    interval_lbl = st.selectbox("Candle Interval", list(intervals.keys()), index=2)
-    interval     = intervals[interval_lbl]
+    if signal_mode == "Pine Exact":
+        # ── EXACT Pine Script replication ────────────────────────────────────
+        # longCondition  = bsp > bspBuyLevel  AND close > ema20 AND ema20 > ema50
+        # shortCondition = bsp < bspSellLevel AND close < ema20 AND ema20 < ema50
+        # strategy.entry("BUY", strategy.long) when longCondition
+        # strategy.close("BUY")               when shortCondition
+        long_entry  = (bsp > buy_lvl)  & bull_trend
+        exit_signal = (bsp < sell_lvl) & bear_trend
+        df["signal"] = np.where(long_entry, 1, np.where(exit_signal, -1, 0))
+        return df
 
-    st.markdown('<div class="sidebar-hdr">📅 Product Type</div>', unsafe_allow_html=True)
-    product_lbl  = st.selectbox("Order Type", list(PRODUCT_TYPES.keys()), index=1,
-                                help="CNC/NRML = carry forward overnight. MIS = intraday auto-square-off.")
-    product_type = PRODUCT_TYPES[product_lbl]
-    is_carry     = product_type == "CNC"
-
-    if not is_carry:
-        eod_time_str = st.time_input("EOD Square-off Time", value=datetime.strptime("15:15", "%H:%M").time(),
-                                      help="Auto-close all positions at this time (Intraday mode only)")
-    else:
-        eod_time_str = None
-        st.info("📦 Carry Forward: positions roll overnight. Manual exit required or use Kill Switch.")
-
-    order_lbl    = st.selectbox("Execution Order Type", list(ORDER_TYPES.keys()), index=0)
-    order_type   = ORDER_TYPES[order_lbl]
-
-    st.markdown('<div class="sidebar-hdr">📌 Option Legs</div>', unsafe_allow_html=True)
-    PRESETS = {
-        "Custom":           None,
-        "Bull Call Spread": [("CALL","ATM",0,"BUY"),  ("CALL","ATM+1",1,"SELL")],
-        "Bear Put Spread":  [("PUT","ATM",0,"BUY"),   ("PUT","ATM-1",-1,"SELL")],
-        "Long Straddle":    [("CALL","ATM",0,"BUY"),  ("PUT","ATM",0,"BUY")],
-        "Short Strangle":   [("CALL","ATM+1",1,"SELL"),("PUT","ATM-1",-1,"SELL")],
-        "Iron Condor":      [("PUT","ATM-2",-2,"BUY"),("PUT","ATM-1",-1,"SELL"),
-                             ("CALL","ATM+1",1,"SELL"),("CALL","ATM+2",2,"BUY")],
-        "Naked Call":       [("CALL","ATM",0,"BUY")],
-        "Naked Put":        [("PUT","ATM",0,"BUY")],
-    }
-    expiry_flag = st.radio("Expiry", ["WEEK","MONTH"], horizontal=True)
-    preset      = st.selectbox("Strategy Template", list(PRESETS.keys()), index=6)
-    n_legs      = st.selectbox("Legs", [1,2,3,4], index=0)
-
-    offsets_list  = list(range(-10, 11))
-    offset_labels = [get_strike_label(o) for o in offsets_list]
-    option_legs   = []
-
-    for i in range(n_legs):
-        with st.expander(f"Leg {i+1}", expanded=(i == 0)):
-            if preset != "Custom" and PRESETS[preset] and i < len(PRESETS[preset]):
-                p_type, p_lbl, p_off, p_dir = PRESETS[preset][i]
-                d_type = 0 if p_type == "CALL" else 1
-                d_dir  = 0 if p_dir  == "BUY"  else 1
-                d_lbl  = p_lbl
+    elif signal_mode == "Level Hold":
+        long_entry  = (bsp > buy_lvl)  & bull_trend
+        short_entry = (bsp < sell_lvl) & bear_trend
+        long_exit   = bsp < 0
+        short_exit  = bsp > 0
+        sigs = [0] * len(df)
+        for i in range(1, len(df)):
+            prev = sigs[i - 1]
+            if long_entry.iloc[i]:
+                sigs[i] = 1
+            elif short_entry.iloc[i]:
+                sigs[i] = -1
+            elif prev == 1 and (long_exit.iloc[i] or short_entry.iloc[i]):
+                sigs[i] = -1
+            elif prev == -1 and (short_exit.iloc[i] or long_entry.iloc[i]):
+                sigs[i] = 1
             else:
-                d_type = 0; d_dir = 0; d_lbl = "ATM"
+                sigs[i] = 0
+        df["signal"] = sigs
+        return df
 
-            c1, c2 = st.columns(2)
-            with c1:
-                lt = st.radio("Type",      ["CE","PE"],       index=d_type, horizontal=True, key=f"lt{i}")
-            with c2:
-                ld = st.radio("Direction", ["BUY","SELL"],    index=d_dir,  horizontal=True, key=f"ld{i}")
-            ls_lbl = st.select_slider("Strike", options=offset_labels,
-                                       value=d_lbl if d_lbl in offset_labels else "ATM", key=f"ls{i}")
-            ls_off = offsets_list[offset_labels.index(ls_lbl)]
-            ll     = st.number_input("Lots", 1, 50, 1, key=f"ll{i}")
-            option_legs.append({
-                "opt_type":   "CALL" if lt == "CE" else "PUT",
-                "direction":  ld,
-                "offset":     ls_off,
-                "strike_lbl": ls_lbl,
-                "lots":       int(ll),
-            })
+    elif signal_mode == "BSP Only":
+        long_entry  = bsp > buy_lvl
+        short_entry = bsp < sell_lvl
 
-    st.markdown('<div class="sidebar-hdr">⚙️ Strategy Parameters</div>', unsafe_allow_html=True)
-    bsp_length   = st.slider("BSP Length",    5, 50, 21)
-    bsp_buy_lvl  = st.number_input("BSP Buy Level",  value=0.08,  step=0.01, format="%.2f")
-    bsp_sell_lvl = st.number_input("BSP Sell Level", value=-0.08, step=0.01, format="%.2f")
-    signal_mode  = st.selectbox("Signal Mode", ["Flip","Level Hold","BSP Only"], index=1)
-    ema_filter   = st.checkbox("EMA Filter", value=True, disabled=(signal_mode == "BSP Only"))
+    else:  # Flip — BSP level cross
+        long_entry  = (bsp > buy_lvl)  & (bsp.shift(1) <= buy_lvl)  & bull_trend
+        short_entry = (bsp < sell_lvl) & (bsp.shift(1) >= sell_lvl) & bear_trend
 
-    st.markdown('<div class="sidebar-hdr">💼 Capital & Risk</div>', unsafe_allow_html=True)
-    init_capital = st.number_input("Capital (₹)", value=500_000, step=50_000)
-    if "initial_capital" not in st.session_state or st.session_state["initial_capital"] != init_capital:
-        st.session_state["initial_capital"] = init_capital
-        st.session_state["current_capital"] = init_capital
+    df["signal"] = np.where(long_entry, 1, np.where(short_entry, -1, 0))
+    return df
 
-    sizing_mode = st.radio("Sizing", ["% of Capital","Fixed Lots"], horizontal=True)
-    if sizing_mode == "% of Capital":
-        size_pct   = st.slider("Size (%)", 5, 100, 20) / 100
-        fixed_lots_val = None
+
+def run_backtest(df: pd.DataFrame, capital: float, size_pct: float,
+                 comm_pct: float, lot_size: int,
+                 trade_options: bool = False,
+                 fixed_lots: int = None,
+                 spread_legs: list = None,
+                 is_intraday: bool = False,
+                 eod_exit_time=None) -> tuple[pd.DataFrame, list]:
+    """
+    Spread-aware lot-based backtest.
+
+    Single leg:  price_col = opt_price (or close for index mode)
+    Multi-leg:   spread_price column = sum of signed leg prices already on df.
+                 Per-leg P&L breakdown recorded in each trade dict.
+
+    Sizing:
+      fixed_lots → that many SCALE lots (each leg uses its own leg["lots"] ratio)
+      % of Capital → lots = floor(budget / |spread_cost_per_lot|)
+
+    is_intraday: force-close all positions at eod_exit_time each trading day
+    eod_exit_time: datetime.time object for EOD square-off (default 15:15)
+    """
+    cash, pos_lots, entry_spread, entry_time = capital, 0, 0.0, None
+    in_trade = False
+    equities, trades = [], []
+
+    # Determine price column
+    if trade_options and spread_legs and "spread_price" in df.columns:
+        price_col = "spread_price"
+        is_spread  = True
+    elif trade_options and "opt_price" in df.columns:
+        price_col = "opt_price"
+        is_spread  = False
     else:
-        fixed_lots_val = st.number_input("Fixed Lots", 1, 100, 1)
-        size_pct       = 0.2
+        price_col = "close"
+        is_spread  = False
 
-    max_positions = st.number_input("Max Open Positions", 1, 10, 3)
-    sl_pct        = st.number_input("Stop Loss (%)", 0.0, 50.0, 10.0, step=0.5,
-                                     help="Per-trade stop loss as % of entry premium. 0 = disabled.")
-    tp_pct        = st.number_input("Take Profit (%)", 0.0, 100.0, 20.0, step=0.5,
-                                     help="Per-trade take profit as % of entry premium. 0 = disabled.")
+    # Build per-leg price lookups for spread mode
+    leg_price_series = {}
+    if is_spread and spread_legs:
+        ts_index = df["timestamp"].values
+        for i, ld in enumerate(spread_legs):
+            leg_price_series[i] = ld["prices"].reindex(
+                pd.Index(ts_index)
+            ).ffill().fillna(0).values
 
-    st.markdown('<div class="sidebar-hdr">🔄 Refresh</div>', unsafe_allow_html=True)
-    refresh_secs = st.selectbox("Auto-refresh", [10, 15, 30, 60, 120], index=2,
-                                 help="How often to fetch new bar data and check signals")
+    df_ts = df["timestamp"].values  # fast numpy access
 
-    st.markdown('<div class="sidebar-hdr">🎭 Execution Mode</div>', unsafe_allow_html=True)
-    dry_run = st.checkbox("🧪 Paper Trade (no real orders)", value=True,
-                           help="Test strategy logic without sending orders to Dhan.")
-    if not dry_run:
-        st.warning("⚠️ **LIVE MODE** — Real orders will be placed on Dhan!", icon="🔴")
-
-    strategy_params = {
-        "bsp_length": bsp_length, "bsp_buy_lvl": bsp_buy_lvl, "bsp_sell_lvl": bsp_sell_lvl,
-        "signal_mode": signal_mode, "ema_filter": ema_filter,
-        "sl_pct": sl_pct, "tp_pct": tp_pct,
-    }
-    st.session_state["strategy_params"] = strategy_params
-
-# ══════════════════════════════════════════════════════════════════════════════
-# HEADER + ENGINE CONTROLS
-# ══════════════════════════════════════════════════════════════════════════════
-st.markdown("## 🚀 NYZTrade · SMC Algo Platform")
-st.caption(f"Live Trading Engine | BSP + EMA | {index_name} | Dhan API | {'📦 Carry Forward' if is_carry else '⚡ Intraday'}")
-
-col_status, col_c1, col_c2, col_c3, col_c4 = st.columns([2,1,1,1,1])
-with col_status:
-    if st.session_state["algo_running"] and not st.session_state["algo_paused"]:
-        st.markdown('<div class="status-live">⚡ ALGO RUNNING</div>', unsafe_allow_html=True)
-    elif st.session_state["algo_paused"]:
-        st.markdown('<div class="status-paused">⏸ PAUSED</div>', unsafe_allow_html=True)
+    import datetime as _dt
+    # Resolve EOD exit time
+    if is_intraday and eod_exit_time is not None:
+        _eod_h, _eod_m = eod_exit_time.hour, eod_exit_time.minute
     else:
-        st.markdown('<div class="status-flat">⬤ STOPPED</div>', unsafe_allow_html=True)
+        _eod_h, _eod_m = 15, 15   # default fallback
 
-with col_c1:
-    if st.button("▶ START", type="primary", use_container_width=True,
-                  disabled=st.session_state["algo_running"] or not token_ok):
-        st.session_state["algo_running"]  = True
-        st.session_state["algo_paused"]   = False
-        st.rerun()
+    for row_i, row in df.iterrows():
+        sig = row["signal"]
+        ts  = row["timestamp"]
+        raw_price = row[price_col]
 
-with col_c2:
-    if st.button("⏸ PAUSE", use_container_width=True,
-                  disabled=not st.session_state["algo_running"]):
-        st.session_state["algo_paused"] = not st.session_state["algo_paused"]
-        st.rerun()
+        if pd.isna(raw_price):
+            equities.append(cash + pos_lots * (entry_spread if in_trade else 0))
+            continue
 
-with col_c3:
-    if st.button("⏹ STOP", use_container_width=True,
-                  disabled=not st.session_state["algo_running"]):
-        st.session_state["algo_running"] = False
-        st.session_state["algo_paused"]  = False
-        st.rerun()
+        # Spread price = net debit/credit per scale-lot
+        spread_price = float(raw_price)
 
-with col_c4:
-    if st.button("🛑 KILL", use_container_width=True, type="secondary",
-                  help="Cancel all orders + square off ALL positions immediately"):
-        if token_ok:
-            with st.spinner("Executing kill switch…"):
-                ok = api.kill_switch()
-            st.success("Kill switch executed.") if ok else st.error("Kill switch partially failed — check Dhan app.")
-            st.session_state["algo_running"] = False
-            st.session_state["positions"]    = []
-        else:
-            st.error("Configure token first.")
-
-st.divider()
-
-# ══════════════════════════════════════════════════════════════════════════════
-# MAIN TABS
-# ══════════════════════════════════════════════════════════════════════════════
-tab_live, tab_pos, tab_orders, tab_trades, tab_risk, tab_carry, tab_log = st.tabs([
-    "📡 Live Signal",
-    "📂 Positions",
-    "📋 Orders",
-    "📊 Trade Log",
-    "⚖️ Risk & P&L",
-    "📦 Carry Forward",
-    "🔧 System Log",
-])
-
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 1 — LIVE SIGNAL + CHART
-# ══════════════════════════════════════════════════════════════════════════════
-with tab_live:
-    st.markdown("### 📡 Live Signal Monitor")
-
-    refresh_col, fetch_col = st.columns([3, 1])
-    with fetch_col:
-        manual_refresh = st.button("🔄 Refresh Now", use_container_width=True)
-
-    # Fetch recent bars (last 2 days for indicators to warm up)
-    fetch_from = (datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d")
-    fetch_to   = datetime.now().strftime("%Y-%m-%d")
-
-    should_fetch = (
-        manual_refresh or
-        st.session_state["live_df"] is None or
-        st.session_state.get("last_refresh") is None or
-        (datetime.now() - st.session_state["last_refresh"]).seconds >= refresh_secs
-    )
-
-    if should_fetch and token_ok:
-        with st.spinner("📡 Fetching live bars…"):
-            live_df = api.fetch_ohlcv(
-                idx_cfg["security_id"], fetch_from, fetch_to,
-                interval=interval if interval != "D" else "5",
-                is_index=True
+        # ── INTRADAY EOD FORCE-CLOSE ──────────────────────────────────────
+        # If Intraday mode: square off at/after eod_exit_time on each day
+        if is_intraday and in_trade:
+            bar_time = ts.time() if hasattr(ts, "time") else (
+                _dt.datetime.fromtimestamp(ts.timestamp()).time()
+                if hasattr(ts, "timestamp") else None
             )
-        if live_df is not None:
-            st.session_state["live_df"]      = live_df
-            st.session_state["last_refresh"] = datetime.now()
-    elif not token_ok:
-        st.warning("Configure your Dhan token in the sidebar to fetch live data.")
+            if bar_time and bar_time >= _dt.time(_eod_h, _eod_m):
+                eod_spread = spread_price
+                qty        = pos_lots * lot_size
+                pnl        = (eod_spread - entry_spread) * qty - abs(eod_spread) * qty * comm_pct
+                cash      += abs(entry_spread) * qty + pnl
+                trade_rec  = {
+                    "entry_time":  entry_time, "exit_time": ts,
+                    "entry_price": round(entry_spread, 2), "exit_price": round(eod_spread, 2),
+                    "qty": qty, "lots": pos_lots,
+                    "pnl": round(pnl, 2),
+                    "return_pct": round((eod_spread / entry_spread - 1) * 100, 2) if entry_spread != 0 else 0.0,
+                    "exit_reason": "EOD Square-off",
+                    "strike": row.get("strike", "-"),
+                }
+                if is_spread and spread_legs:
+                    for i, ld in enumerate(spread_legs):
+                        lp_arr = leg_price_series.get(i)
+                        if lp_arr is not None and row_i < len(lp_arr):
+                            try:
+                                eidx = list(df_ts).index(entry_time)
+                                ep = float(lp_arr[eidx]); xp = float(lp_arr[row_i])
+                            except (ValueError, IndexError):
+                                ep = xp = 0.0
+                            sign = 1 if ld["direction"] == "BUY" else -1
+                            trade_rec[f"leg{i+1}_{ld['strike_lbl']}_{ld['opt_type']}"] = round(
+                                sign * (xp - ep) * ld["lots"] * lot_size, 2)
+                trades.append(trade_rec)
+                pos_lots, in_trade = 0, False
+                equities.append(cash)
+                continue  # skip further processing for this bar
 
-    live_df = st.session_state.get("live_df")
+        # ── ENTRY — trigger on BUY signal (or SELL signal for short legs) ──
+        # Entry fires on sig==1 (long) or sig==-1 when no position open
+        # In Intraday mode: block new entries after EOD time
+        _bar_time_now = ts.time() if hasattr(ts, "time") else None
+        _block_entry  = is_intraday and _bar_time_now and _bar_time_now >= _dt.time(_eod_h, _eod_m)
+        entry_triggered = (sig == 1 and not in_trade and not _block_entry)
 
-    # ── Signal Check ─────────────────────────────────────────────────────────
-    if live_df is not None:
-        sig_info = check_signals(live_df, strategy_params)
-        last_refresh_str = st.session_state.get("last_refresh")
-        if last_refresh_str:
-            st.caption(f"Last refresh: {last_refresh_str.strftime('%H:%M:%S')} | Bars: {len(live_df):,}")
+        if entry_triggered:
+            # Cost basis: |spread_price| × lot_size per scale-lot
+            cost_per_lot = abs(spread_price) * lot_size
+            if cost_per_lot < 0.01:
+                equities.append(cash)
+                continue
 
-        # KPI row
-        k1, k2, k3, k4, k5 = st.columns(5)
-        sig_val  = sig_info["signal"]
-        sig_icon = "🟢 BUY" if sig_val == 1 else ("🔴 SELL/EXIT" if sig_val == -1 else "⚪ NEUTRAL")
-        k1.metric("Signal",    sig_icon)
-        k2.metric("BSP",       f"{sig_info['bsp']:.4f}")
-        k3.metric("EMA 20",    f"₹{sig_info['ema20']:,.0f}")
-        k4.metric("EMA 50",    f"₹{sig_info['ema50']:,.0f}")
-        k5.metric("Last Close",f"₹{sig_info['close']:,.2f}")
-        st.caption(f"💬 {sig_info['reason']}")
+            if fixed_lots is not None:
+                scale_lots = int(fixed_lots)
+            else:
+                scale_lots = max(int(cash * size_pct / cost_per_lot), 1)
 
-        # ── Auto-execute logic ────────────────────────────────────────────────
-        if st.session_state["algo_running"] and not st.session_state["algo_paused"]:
-            open_pos_count = len([p for p in st.session_state["positions"] if p["status"] == "OPEN"])
+            total_cost = cost_per_lot * scale_lots * (1 + comm_pct)
+            if total_cost <= cash:
+                pos_lots     = scale_lots
+                cash        -= total_cost
+                entry_spread = spread_price
+                entry_time   = ts
+                in_trade     = True
 
-            # ENTRY
-            if sig_val == 1 and open_pos_count < max_positions:
-                spot     = sig_info["close"]
-                spot_int = int(round(spot))
+        # ── EXIT — on sell signal OR new buy when already in trade ─────────
+        elif in_trade and sig == -1:
+            exit_spread = spread_price
+            qty         = pos_lots * lot_size  # total underlying units
 
-                # Compute scale lots
-                if fixed_lots_val is not None:
-                    scale_lots = int(fixed_lots_val)
-                else:
-                    # Estimate cost from ATM premium (rough: 1% of spot)
-                    est_premium = spot * 0.01
-                    lot_cost    = est_premium * lot_size
-                    scale_lots  = max(int(st.session_state["current_capital"] * size_pct / lot_cost), 1)
+            gross_pnl = (exit_spread - entry_spread) * qty
+            comm_cost = abs(exit_spread) * qty * comm_pct
+            pnl       = gross_pnl - comm_cost
+            cash     += abs(entry_spread) * qty + pnl  # return capital + P&L
 
-                with st.spinner(f"🚀 Placing entry orders for {sig_info['reason']}…"):
-                    responses = execute_spread(
-                        api, index_name, spot, option_legs, scale_lots,
-                        "ENTER", product_type, order_type, dry_run=dry_run
-                    )
+            trade_rec = {
+                "entry_time":    entry_time,
+                "exit_time":     ts,
+                "entry_price":   round(entry_spread, 2),
+                "exit_price":    round(exit_spread,  2),
+                "qty":           qty,
+                "lots":          pos_lots,
+                "pnl":           round(pnl, 2),
+                "return_pct":    round((exit_spread / entry_spread - 1) * 100, 2)
+                                 if entry_spread != 0 else 0.0,
+                "exit_reason":   "Signal",
+                "strike":        row.get("strike", "-"),
+            }
 
-                position = open_position(responses, spot, sig_info, product_type, option_legs)
-                st.session_state["positions"].append(position)
-                st.session_state["orders"].extend(responses)
-                st.session_state["signal_count"] += 1
-                st.success(f"✅ Entered {'(PAPER)' if dry_run else '(LIVE)'}: {len(responses)} leg(s) | Scale lots: {scale_lots}")
+            # Per-leg P&L breakdown for spread trades
+            if is_spread and spread_legs:
+                for i, ld in enumerate(spread_legs):
+                    lp_arr  = leg_price_series.get(i)
+                    if lp_arr is not None and row_i < len(lp_arr):
+                        # Find entry row index (approx by timestamp match)
+                        try:
+                            entry_idx = list(df_ts).index(entry_time)
+                            ep = float(lp_arr[entry_idx])
+                            xp = float(lp_arr[row_i])
+                        except (ValueError, IndexError):
+                            ep = xp = 0.0
+                        sign      = 1 if ld["direction"] == "BUY" else -1
+                        leg_pnl   = sign * (xp - ep) * ld["lots"] * lot_size
+                        trade_rec[f"leg{i+1}_{ld['strike_lbl']}_{ld['opt_type']}"] = round(leg_pnl, 2)
 
-            # EXIT — signal reversal
-            elif sig_val == -1:
-                for pos in st.session_state["positions"]:
-                    if pos["status"] == "OPEN":
-                        spot = sig_info["close"]
-                        with st.spinner("Closing position…"):
-                            responses = execute_spread(
-                                api, index_name, spot, pos["legs"], 1,
-                                "EXIT", pos["product_type"], order_type, dry_run=dry_run
-                            )
-                        pos["status"]        = "CLOSED"
-                        pos["exit_time"]     = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        pos["exit_spot"]     = spot
-                        pos["exit_orders"]   = responses
-                        pos["realized_pnl"]  = pos.get("mtm_pnl", 0)
+            trades.append(trade_rec)
+            pos_lots, in_trade = 0, False
 
-                        trade_rec = {
-                            "entry_time":  pos["entry_time"],
-                            "exit_time":   pos["exit_time"],
-                            "entry_spot":  pos["entry_spot"],
-                            "exit_spot":   pos["exit_spot"],
-                            "strategy":    " | ".join(
-                                f"{l['direction']} {l['lots']}L {l['strike_lbl']} {l['opt_type']}"
-                                for l in pos["legs"]
-                            ),
-                            "pnl":         pos["realized_pnl"],
-                            "product":     pos["product_type"],
-                            "signal":      pos["signal"],
-                            "reason":      pos["reason"],
-                        }
-                        st.session_state["trade_log"].append(trade_rec)
-                        st.session_state["orders"].extend(responses)
-                        total_pnl = sum(t["pnl"] for t in st.session_state["trade_log"])
-                        st.session_state["current_capital"] = init_capital + total_pnl
-                        cap_now = st.session_state["current_capital"]
-                        st.session_state["equity_curve"].append(
-                            {"timestamp": datetime.now().isoformat(), "equity": cap_now}
-                        )
-                        st.success(f"✅ Exited position | P&L: ₹{pos['realized_pnl']:,.2f}")
+        # Mark-to-market equity
+        mtm = spread_price * pos_lots * lot_size if in_trade else 0
+        equities.append(cash + mtm)
 
-        # ── Intraday EOD check ────────────────────────────────────────────────
-        if not is_carry and eod_time_str:
-            now_time = datetime.now().time()
-            eod_t    = eod_time_str
-            if now_time >= eod_t:
-                open_pos = [p for p in st.session_state["positions"] if p["status"] == "OPEN"]
-                if open_pos:
-                    st.warning(f"⏰ EOD square-off time ({eod_t}) reached — closing all intraday positions.")
-                    for pos in open_pos:
-                        pos["status"]       = "CLOSED_EOD"
-                        pos["exit_time"]    = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        pos["realized_pnl"] = pos.get("mtm_pnl", 0)
+    # Force-close open position at last bar
+    if in_trade and pos_lots > 0:
+        lp = float(df[price_col].iloc[-1])
+        qty = pos_lots * lot_size
+        pnl = (lp - entry_spread) * qty - abs(lp) * qty * comm_pct
+        cash += abs(entry_spread) * qty + pnl
+        trade_rec = {
+            "entry_time":  entry_time, "exit_time": df["timestamp"].iloc[-1],
+            "entry_price": round(entry_spread, 2), "exit_price": round(lp, 2),
+            "qty": qty, "lots": pos_lots,
+            "pnl": round(pnl, 2),
+            "return_pct": round((lp / entry_spread - 1) * 100, 2) if entry_spread != 0 else 0.0,
+            "exit_reason": "End of Data",
+            "strike": df["strike"].iloc[-1] if "strike" in df.columns else "-",
+        }
+        if is_spread and spread_legs:
+            for i, ld in enumerate(spread_legs):
+                lp_arr = leg_price_series.get(i)
+                if lp_arr is not None:
+                    try:
+                        entry_idx = list(df_ts).index(entry_time)
+                        ep = float(lp_arr[entry_idx])
+                        xp = float(lp_arr[-1])
+                    except (ValueError, IndexError):
+                        ep = xp = 0.0
+                    sign    = 1 if ld["direction"] == "BUY" else -1
+                    leg_pnl = sign * (xp - ep) * ld["lots"] * lot_size
+                    trade_rec[f"leg{i+1}_{ld['strike_lbl']}_{ld['opt_type']}"] = round(leg_pnl, 2)
+        trades.append(trade_rec)
+        if equities:
+            equities[-1] = cash
 
-        # ── Live Chart ───────────────────────────────────────────────────────
-        st.markdown("---")
-        st.markdown("#### 📈 Live Chart")
-        chart_df = live_df.copy()
-        chart_df["ema20"] = ema(chart_df["close"], 20)
-        chart_df["ema50"] = ema(chart_df["close"], 50)
-        chart_df["bsp"]   = calc_bsp(chart_df, bsp_length)
+    while len(equities) < len(df):
+        equities.append(equities[-1] if equities else capital)
 
-        fig = make_subplots(
-            rows=2, cols=1, shared_xaxes=True,
-            row_heights=[0.70, 0.30], vertical_spacing=0.03,
-            subplot_titles=["Price + EMA", "BSP Oscillator"]
-        )
-        fig.add_trace(go.Candlestick(
-            x=chart_df["timestamp"], open=chart_df["open"], high=chart_df["high"],
-            low=chart_df["low"],  close=chart_df["close"], name=index_name,
-            increasing_line_color="#00d4aa", decreasing_line_color="#ff4b6e"
-        ), row=1, col=1)
-        for e_col, e_color, e_name in [("ema20","#f5a623","EMA 20"), ("ema50","#a78bfa","EMA 50")]:
-            fig.add_trace(go.Scatter(
-                x=chart_df["timestamp"], y=chart_df[e_col],
-                line=dict(color=e_color, width=1), name=e_name
-            ), row=1, col=1)
+    results = df[["timestamp"]].copy()
+    results["equity"]       = equities[:len(df)]
+    results["peak"]         = results["equity"].cummax()
+    results["drawdown_pct"] = (results["equity"] - results["peak"]) / results["peak"] * 100
+    return results, trades
 
-        bsp_colors = chart_df["bsp"].apply(lambda v: "#00d4aa" if v > 0 else "#ff4b6e")
-        fig.add_trace(go.Bar(
-            x=chart_df["timestamp"], y=chart_df["bsp"],
-            name="BSP", marker_color=bsp_colors
-        ), row=2, col=1)
-        fig.add_hline(y=bsp_buy_lvl,  line_color="#00d4aa", line_dash="dash", row=2, col=1)
-        fig.add_hline(y=bsp_sell_lvl, line_color="#ff4b6e", line_dash="dash", row=2, col=1)
-        fig.add_hline(y=0, line_color="#333", row=2, col=1)
 
-        # Annotate entry/exit on chart from trade log
-        for t in st.session_state["trade_log"][-20:]:
-            try:
-                et = pd.to_datetime(t["entry_time"])
-                fig.add_vline(x=et, line_color="#00d4aa", line_dash="dot", line_width=1, row=1, col=1)
-            except: pass
+def metrics(results: pd.DataFrame, trades: list, capital: float) -> dict:
+    import math
 
-        fig.update_layout(
-            height=550, template="plotly_dark",
-            paper_bgcolor="#0a0d14", plot_bgcolor="#0a0d14",
-            xaxis_rangeslider_visible=False,
-            margin=dict(t=30, b=10),
-            legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(size=10))
-        )
-        fig.update_xaxes(showgrid=True, gridcolor="#1a1d29")
-        fig.update_yaxes(showgrid=True, gridcolor="#1a1d29")
-        st.plotly_chart(fig, use_container_width=True)
+    final = results["equity"].iloc[-1]
+    pnl   = final - capital
+    ret   = round(pnl / capital * 100, 2)
+
+    # CAGR — clamp to ±10000% to avoid astronomical display
+    n_days = max((results["timestamp"].iloc[-1] - results["timestamp"].iloc[0]).days, 1)
+    ratio  = max(final / capital, 1e-10) if capital > 0 else 1.0
+    try:
+        cagr_raw = (ratio ** (365.0 / n_days) - 1) * 100
+        cagr = round(max(min(cagr_raw, 10_000.0), -100.0), 2)
+    except (OverflowError, ZeroDivisionError):
+        cagr = 10_000.0 if ret > 0 else -100.0
+
+    max_dd = round(results["drawdown_pct"].min(), 2)
+
+    # Sharpe/Sortino on DAILY returns (not bar-by-bar — avoids intraday inflation)
+    try:
+        daily  = results.set_index("timestamp")["equity"].resample("D").last().dropna()
+        d_rets = daily.pct_change().dropna()
+        sharpe  = round(float(d_rets.mean() / d_rets.std() * math.sqrt(252)), 3) if len(d_rets) > 1 and d_rets.std() > 0 else 0.0
+        neg     = d_rets[d_rets < 0]
+        sortino = round(float(d_rets.mean() / neg.std() * math.sqrt(252)), 3) if len(neg) > 1 and neg.std() > 0 else 0.0
+        sharpe  = max(min(sharpe,  999.0), -999.0)
+        sortino = max(min(sortino, 999.0), -999.0)
+    except Exception:
+        sharpe = sortino = 0.0
+
+    calmar = round(cagr / abs(max_dd), 2) if max_dd != 0 else 0.0
+    calmar = max(min(calmar, 999.0), -999.0)
+
+    pnls   = [t["pnl"] for t in trades]
+    wins   = [p for p in pnls if p > 0]
+    losses = [p for p in pnls if p <= 0]
+    gp, gl = sum(wins), abs(sum(losses))
+
+    return {
+        "total_return":  ret,
+        "total_pnl":     round(pnl, 2),
+        "cagr":          cagr,
+        "max_drawdown":  max_dd,
+        "sharpe":        sharpe,
+        "sortino":       sortino,
+        "calmar":        calmar,
+        "total_trades":  len(trades),
+        "win_rate":      round(len(wins)/len(trades)*100, 1) if trades else 0.0,
+        "profit_factor": round(gp/gl, 2) if gl > 0 else (round(gp, 2) if gp > 0 else 0.0),
+        "avg_win":       round(float(np.mean(wins)),   2) if wins   else 0.0,
+        "avg_loss":      round(float(np.mean(losses)), 2) if losses else 0.0,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SIDEBAR
+# ══════════════════════════════════════════════════════════════════════════════
+
+with st.sidebar:
+
+    # ── Token Status ─────────────────────────────────────────────────────────
+    cfg = DhanConfig()
+    if cfg.access_token and cfg.access_token != "paste_your_token_here":
+        st.success(f"✅ Token configured · Client: `{cfg.client_id}`")
     else:
-        st.info("No data yet — click **Refresh Now** or configure your token.")
+        st.error("❌ Token not set — update `access_token` in DhanConfig at top of app.py")
 
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 2 — OPEN POSITIONS
-# ══════════════════════════════════════════════════════════════════════════════
-with tab_pos:
-    st.markdown("### 📂 Open Positions")
+    # ── Index Selection ──────────────────────────────────────────────────────
+    st.markdown('<div class="sidebar-header">📊 Index Settings</div>', unsafe_allow_html=True)
 
-    # Sync from Dhan (if live)
-    if token_ok:
-        col_sync, col_sq = st.columns([1, 1])
-        with col_sync:
-            if st.button("🔄 Sync from Dhan", use_container_width=True):
-                dhan_positions = api.get_positions()
-                st.session_state["_dhan_positions"] = dhan_positions
-        with col_sq:
-            if st.button("❌ Square Off ALL", use_container_width=True, type="secondary"):
-                if not dry_run:
-                    ok = api.kill_switch()
-                    st.success("All positions squared off.") if ok else st.error("Partial failure.")
-                else:
-                    st.info("Paper trade mode — no real orders.")
+    index_name = st.selectbox("Select Index", list(INDICES.keys()), index=0)
+    idx_cfg    = INDICES[index_name]
+    lot_size   = idx_cfg["lot_size"]
+    strike_gap = idx_cfg["strike_gap"]
 
-    # Dhan live positions table
-    dhan_pos = st.session_state.get("_dhan_positions", [])
-    if dhan_pos:
-        st.markdown("#### Dhan Account Positions")
-        dp_df = pd.DataFrame(dhan_pos)
-        display_cols = [c for c in ["tradingSymbol","netQty","avgCostPrice","lastTradedPrice",
-                                     "unrealizedProfit","realizedProfit","productType","exchangeSegment"]
-                        if c in dp_df.columns]
-        if display_cols:
-            st.dataframe(dp_df[display_cols], use_container_width=True)
-        else:
-            st.json(dhan_pos[:5])
+    st.caption(f"Lot Size: **{lot_size}** | Strike Gap: **{strike_gap}**")
 
-    # Algorithm tracked positions
-    algo_positions = st.session_state["positions"]
-    open_pos  = [p for p in algo_positions if p["status"] == "OPEN"]
-    closed_pos = [p for p in algo_positions if p["status"] != "OPEN"]
+    # ── Trade Style ────────────────────────────────────────────────────────
+    trade_style = st.radio(
+        "Trade Style",
+        ["📈 Intraday", "🌙 Carry Forward"],
+        horizontal=True,
+        help="Intraday: positions force-squared off at EOD each day.\n"
+             "Carry Forward: positions held overnight until exit signal fires.",
+    )
+    is_intraday = trade_style == "📈 Intraday"
 
-    st.markdown(f"#### Algo-Tracked Positions ({len(open_pos)} open, {len(closed_pos)} closed)")
-
-    if not open_pos:
-        st.info("No open algo positions.")
+    if is_intraday:
+        INTRADAY_TF = {
+            "1 Min": "1", "3 Min": "3", "5 Min": "5",
+            "10 Min": "10", "15 Min": "15", "25 Min": "25",
+        }
+        interval_lbl = st.selectbox("Timeframe", list(INTRADAY_TF.keys()), index=2,
+                                     help="Intraday timeframes only")
+        interval     = INTRADAY_TF[interval_lbl]
+        c_eod1, c_eod2 = st.columns(2)
+        with c_eod1:
+            eod_hour   = st.number_input("EOD Exit Hour",   min_value=9,  max_value=15, value=15, step=1)
+        with c_eod2:
+            eod_minute = st.number_input("EOD Exit Minute", min_value=0,  max_value=59, value=15, step=5)
+        import datetime as _dt2
+        eod_exit_time = _dt2.time(int(eod_hour), int(eod_minute))
     else:
-        for i, pos in enumerate(open_pos):
-            carry_badge = "📦 CARRY" if pos.get("carry_flag") else "⚡ INTRADAY"
-            with st.expander(
-                f"{'✅' if pos['signal']==1 else '🔴'} {carry_badge} | "
-                f"Entry: {pos['entry_time']} | Spot: ₹{pos['entry_spot']:,.0f}",
-                expanded=True
-            ):
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Entry Spot",   f"₹{pos['entry_spot']:,.0f}")
-                c2.metric("Product",      pos["product_type"])
-                c3.metric("MTM P&L",      f"₹{pos.get('mtm_pnl', 0):,.2f}")
+        CF_TF = {
+            "5 Min": "5", "15 Min": "15", "25 Min": "25",
+            "60 Min": "60", "Daily": "D",
+        }
+        interval_lbl = st.selectbox("Timeframe", list(CF_TF.keys()), index=4,
+                                     help="Carry Forward — positions held overnight")
+        interval     = CF_TF[interval_lbl]
+        eod_exit_time = None
 
-                st.caption(f"Signal: {pos.get('reason', 'N/A')} | BSP: {pos.get('bsp_at_entry', 0):.4f}")
-
-                st.markdown("**Legs:**")
-                for l in pos.get("legs", []):
-                    st.markdown(
-                        f"  • `{l['direction']}` **{l['lots']}L** {l['strike_lbl']} {l['opt_type']}"
-                    )
-
-                if not dry_run:
-                    if st.button(f"❌ Close Position #{i+1}", key=f"close_pos_{i}"):
-                        spot_now = sig_info.get("close", pos["entry_spot"]) if live_df is not None else pos["entry_spot"]
-                        responses = execute_spread(
-                            api, index_name, spot_now, pos["legs"], 1,
-                            "EXIT", pos["product_type"], order_type, dry_run=dry_run
-                        )
-                        pos["status"]       = "CLOSED"
-                        pos["exit_time"]    = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        pos["exit_spot"]    = spot_now
-                        st.success("Position closed.")
-                        st.rerun()
-                else:
-                    if st.button(f"📄 Simulate Close #{i+1}", key=f"sim_close_{i}"):
-                        pos["status"]      = "CLOSED"
-                        pos["exit_time"]   = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        pos["exit_spot"]   = pos["entry_spot"]
-                        pos["realized_pnl"]= 0.0
-                        st.info("Paper close recorded.")
-                        st.rerun()
-
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 3 — ORDERS
-# ══════════════════════════════════════════════════════════════════════════════
-with tab_orders:
-    st.markdown("### 📋 Order Book")
+    bsp_tf = st.selectbox(
+        "BSP Timeframe",
+        ["Daily (Pine Default ✅)", "Same as Chart"],
+        index=0,
+        help=(
+            "Daily (Pine Default): matches TradingView Pine Script exactly. "
+            "Pine uses request.security(..., 'D', mf) — BSP is ALWAYS computed on Daily bars "
+            "regardless of chart timeframe.\n\n"
+            "Same as Chart: BSP computed on your selected candle interval."
+        )
+    )
+    use_daily_bsp = "Daily" in bsp_tf
 
     c1, c2 = st.columns(2)
     with c1:
-        if st.button("🔄 Fetch from Dhan", key="fetch_orders") and token_ok:
-            dhan_orders = api.get_orders()
-            st.session_state["_dhan_orders"] = dhan_orders
+        default_from = (datetime.now() - timedelta(days=30)) if is_intraday else (datetime.now() - timedelta(days=365))
+        from_date = st.date_input("From", default_from)
+    with c2:
+        to_date = st.date_input("To", datetime.now())
 
-    dhan_orders = st.session_state.get("_dhan_orders", [])
-    if dhan_orders:
-        st.markdown("#### Today's Orders (Dhan)")
-        o_df = pd.DataFrame(dhan_orders)
-        show_cols = [c for c in ["orderId","tradingSymbol","transactionType","orderType",
-                                   "quantity","price","orderStatus","productType","createTime"]
-                     if c in o_df.columns]
-        if show_cols:
-            def color_order(v):
-                if isinstance(v, str):
-                    if v in ("TRADED","COMPLETE"): return "color:#00d4aa"
-                    if v in ("REJECTED","CANCELLED"): return "color:#ff4b6e"
-                    if v in ("PENDING","TRANSIT"): return "color:#f5a623"
-                return ""
-            st.dataframe(
-                o_df[show_cols].style.applymap(color_order, subset=["orderStatus"] if "orderStatus" in o_df.columns else []),
-                use_container_width=True, height=400
-            )
+    if is_intraday and (to_date - from_date).days > 90:
+        st.warning("⚠️ Intraday data: Dhan API allows max ~90 days per call. Consider shorter ranges for speed.")
 
-    # Algo-generated orders (paper + live)
-    algo_orders = st.session_state.get("orders", [])
-    if algo_orders:
-        st.markdown("#### Algo-Generated Orders")
-        ao_rows = []
-        for o in algo_orders:
-            meta = o.get("_meta", {})
-            ao_rows.append({
-                "Order ID":  o.get("orderId", "-"),
-                "Status":    o.get("orderStatus", "-"),
-                "Symbol":    o.get("tradingSymbol", meta.get("index","-")),
-                "Side":      o.get("side", "-"),
-                "Qty":       o.get("quantity", meta.get("lots","-")),
-                "Product":   meta.get("product", "-"),
-                "Paper":     "✅" if o.get("_dry_run") else "🔴 LIVE",
-            })
-        st.dataframe(pd.DataFrame(ao_rows), use_container_width=True, height=300)
+    # ── Backtest Mode ────────────────────────────────────────────────────────
+    st.markdown('<div class="sidebar-header">🎯 Backtest Mode</div>', unsafe_allow_html=True)
 
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 4 — TRADE LOG
-# ══════════════════════════════════════════════════════════════════════════════
-with tab_trades:
-    st.markdown("### 📊 Closed Trade Log")
-    tlog = st.session_state["trade_log"]
-    if not tlog:
-        st.info("No closed trades yet.")
-    else:
-        tdf = pd.DataFrame(tlog)
-        tdf["cum_pnl"] = tdf["pnl"].cumsum().round(2)
-        tdf["pnl"]     = tdf["pnl"].round(2)
+    backtest_mode = st.radio(
+        "Trade on",
+        ["Index (Futures-style)", "Options (Real Data)"],
+        index=0,
+        help="Index mode: signals on index OHLCV. Options mode: uses Dhan rollingoption API for real premium data."
+    )
+    trade_options = backtest_mode == "Options (Real Data)"
 
-        styled = tdf.style.format({"pnl":"{:.2f}","cum_pnl":"{:.2f}"}).applymap(
-            lambda v: ("color:#00d4aa" if isinstance(v,(int,float)) and v>0
-                       else "color:#ff4b6e" if isinstance(v,(int,float)) and v<0 else ""),
-            subset=["pnl","cum_pnl"]
+    if trade_options:
+        st.markdown('<div class="sidebar-header">📌 Option Legs (Spread / Hedge)</div>', unsafe_allow_html=True)
+
+        expiry_flag = st.radio("Expiry Type", ["WEEK", "MONTH"], horizontal=True,
+                               help="Weekly or Monthly expiry contract")
+
+        n_legs = st.selectbox("Number of Legs", [1, 2, 3, 4], index=0,
+                              help="1 = Single option | 2 = Spread | 3-4 = Complex (Iron Condor etc.)")
+
+        # Preset templates
+        PRESETS = {
+            "Custom": None,
+            "Bull Call Spread":  [("CALL","ATM",0,"BUY"),  ("CALL","ATM+1",1,"SELL")],
+            "Bear Put Spread":   [("PUT", "ATM",0,"BUY"),  ("PUT", "ATM-1",-1,"SELL")],
+            "Bull Put Spread":   [("PUT", "ATM-1",-1,"SELL"),("PUT","ATM-2",-2,"BUY")],
+            "Bear Call Spread":  [("CALL","ATM+1",1,"SELL"),("CALL","ATM+2",2,"BUY")],
+            "Long Strangle":     [("CALL","ATM+1",1,"BUY"), ("PUT","ATM-1",-1,"BUY")],
+            "Short Strangle":    [("CALL","ATM+1",1,"SELL"),("PUT","ATM-1",-1,"SELL")],
+            "Long Straddle":     [("CALL","ATM",0,"BUY"),  ("PUT","ATM",0,"BUY")],
+            "Iron Condor":       [("PUT","ATM-2",-2,"BUY"),("PUT","ATM-1",-1,"SELL"),
+                                  ("CALL","ATM+1",1,"SELL"),("CALL","ATM+2",2,"BUY")],
+        }
+
+        preset = st.selectbox("📋 Strategy Template", list(PRESETS.keys()), index=0)
+
+        offsets_list  = list(range(-10, 11))
+        offset_labels = [get_strike_label(o) for o in offsets_list]
+
+        option_legs = []
+        for i in range(n_legs):
+            with st.expander(f"Leg {i+1}", expanded=True):
+                # Auto-fill from preset
+                if preset != "Custom" and PRESETS[preset] and i < len(PRESETS[preset]):
+                    p_type, p_label, p_off, p_dir = PRESETS[preset][i]
+                    def_type = 0 if p_type == "CALL" else 1
+                    def_off  = p_label
+                    def_dir  = 0 if p_dir == "BUY" else 1
+                else:
+                    def_type = 0; def_off = "ATM"; def_dir = 0
+
+                c1, c2 = st.columns(2)
+                with c1:
+                    leg_type = st.radio(f"Type##leg{i}", ["CE (Call)", "PE (Put)"],
+                                        index=def_type, horizontal=True, key=f"leg_type_{i}")
+                with c2:
+                    leg_dir  = st.radio(f"Direction##leg{i}", ["BUY", "SELL"],
+                                        index=def_dir, horizontal=True, key=f"leg_dir_{i}")
+
+                leg_strike_lbl = st.select_slider(
+                    f"Strike##leg{i}",
+                    options=offset_labels,
+                    value=def_off if def_off in offset_labels else "ATM",
+                    key=f"leg_strike_{i}"
+                )
+                leg_offset = offsets_list[offset_labels.index(leg_strike_lbl)]
+                leg_lots   = st.number_input(f"Lots##leg{i}", min_value=1, max_value=50,
+                                              value=1, key=f"leg_lots_{i}")
+
+                option_legs.append({
+                    "opt_type":    "CALL" if "CE" in leg_type else "PUT",
+                    "direction":   leg_dir,          # "BUY" or "SELL"
+                    "offset":      leg_offset,
+                    "strike_lbl":  leg_strike_lbl,
+                    "lots":        int(leg_lots),
+                })
+
+        # Backward compat single-leg variables
+        opt_type      = option_legs[0]["opt_type"]
+        strike_offset = option_legs[0]["offset"]
+
+        # Strategy summary
+        leg_summaries = " | ".join(
+            f"{lg['direction']} {lg['lots']}L {lg['strike_lbl']} {lg['opt_type']}"
+            for lg in option_legs
         )
-        st.dataframe(styled, use_container_width=True, height=400)
+        st.info(f"**Strategy:** {leg_summaries}")
 
-        c1, c2, c3, c4 = st.columns(4)
-        total_pnl = tdf["pnl"].sum()
-        wins = tdf[tdf["pnl"] > 0]
-        c1.metric("Total P&L",     f"₹{total_pnl:,.2f}")
-        c2.metric("Trades",        len(tdf))
-        c3.metric("Win Rate",      f"{len(wins)/len(tdf)*100:.1f}%")
-        c4.metric("Avg P&L",       f"₹{tdf['pnl'].mean():,.2f}")
+    # ── Strategy Parameters ──────────────────────────────────────────────────
+    st.markdown('<div class="sidebar-header">⚙️ Strategy Parameters</div>', unsafe_allow_html=True)
 
-        csv = tdf.to_csv(index=False)
-        st.download_button("⬇️ Export CSV", csv, "nyztrade_trades.csv", "text/csv")
+    pivot_length = st.slider("Pivot Lookback",  3, 20, 5)
+    bsp_length   = st.slider("BSP Length",      5, 50, 21)
+    bsp_buy_lvl  = st.number_input("BSP Buy Level",  value=0.08,  step=0.01, format="%.2f")
+    bsp_sell_lvl = st.number_input("BSP Sell Level", value=-0.08, step=0.01, format="%.2f")
+    vol_threshold = st.slider("Volume Threshold",   1.0, 3.0, 1.5, 0.1)
+    vol_period    = st.slider("Volume SMA Period",   5,  30,  14)
+
+    st.markdown('<div class="sidebar-header">🎚️ Signal Mode</div>', unsafe_allow_html=True)
+    signal_mode = st.selectbox(
+        "Signal Mode",
+        ["Flip", "Level Hold", "BSP Only"],
+        index=1,
+        help=(
+            "Flip: trade only on BSP level CROSS — fewest signals, can miss trades on long history\n"
+            "Level Hold: enter while BSP above threshold, exit when BSP returns to 0 — balanced\n"
+            "BSP Only: no EMA filter, pure BSP — most signals, good for long backtests"
+        )
+    )
+    ema_filter = st.checkbox(
+        "EMA Trend Filter",
+        value=(signal_mode != "BSP Only"),
+        help="Require EMA20 > EMA50 for longs (and vice-versa). Uncheck for more signals on longer histories.",
+        disabled=(signal_mode == "BSP Only")
+    )
+
+    st.markdown('<div class="sidebar-header">📈 EMA Display</div>', unsafe_allow_html=True)
+    c1, c2 = st.columns(2)
+    with c1:
+        show_e20  = st.checkbox("EMA 20",  True)
+        show_e50  = st.checkbox("EMA 50",  True)
+    with c2:
+        show_e100 = st.checkbox("EMA 100", True)
+        show_e200 = st.checkbox("EMA 200", True)
+
+    st.markdown('<div class="sidebar-header">💼 Capital & Sizing</div>', unsafe_allow_html=True)
+    init_capital  = st.number_input("Initial Capital (₹)", value=500000, step=50000)
+    sizing_mode   = st.radio("Position Sizing", ["% of Capital", "Fixed Lots"], horizontal=True)
+    if sizing_mode == "% of Capital":
+        pos_size_pct = st.slider("Position Size (%)", 5, 100, 50)
+        fixed_lots   = None
+    else:
+        fixed_lots   = st.number_input("Fixed Lots per Trade", min_value=1, max_value=100, value=1, step=1)
+        pos_size_pct = 100   # unused in fixed mode, placeholder
+    comm_pct = st.number_input("Commission (%)", value=0.03, step=0.01, format="%.3f")
+
+    st.markdown('<div class="sidebar-header">🔄 Trade Style</div>', unsafe_allow_html=True)
+    trade_style = st.radio(
+        "Position Carrying",
+        ["📅 Intraday (MIS)", "📆 Carry Forward (NRML)"],
+        index=0,
+        help=(
+            "Intraday (MIS): All open positions are force-closed at 15:15 IST each day.\n"
+            "Carry Forward (NRML): Positions can be held overnight across multiple days."
+        )
+    )
+    is_intraday = (trade_style == "📅 Intraday (MIS)")
+
+    if is_intraday:
+        eod_exit_time = st.time_input(
+            "EOD Square-off Time",
+            value=__import__("datetime").time(15, 15),
+            help="Force-close all positions at this time each day (default 15:15 IST)"
+        )
+    else:
+        eod_exit_time = None
+
+    st.markdown('<div class="sidebar-header">🛠️ Debug</div>', unsafe_allow_html=True)
+    debug_mode = st.checkbox("Show API request/response", False,
+                              help="Shows raw payloads and responses to diagnose API errors")
+
+    run_btn = st.button("🚀 Run Backtest", type="primary", use_container_width=True)
+
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 5 — RISK & EQUITY
+# HEADER
 # ══════════════════════════════════════════════════════════════════════════════
-with tab_risk:
-    st.markdown("### ⚖️ Risk Dashboard & Equity Curve")
 
-    # Funds from Dhan
-    if token_ok:
-        if st.button("🔄 Fetch Funds from Dhan"):
-            funds = api.get_funds()
-            st.session_state["_funds"] = funds
+st.markdown(f"## 📡 NYZTrade · SMC Liquidity Lens — Index Backtest")
+st.caption("Smart Money Concepts + BSP Oscillator + FVG | Indian Indices | Dhan API")
+st.divider()
 
-    funds = st.session_state.get("_funds")
-    if funds:
-        st.markdown("#### Account Funds")
-        fc1, fc2, fc3, fc4 = st.columns(4)
-        fc1.metric("Available Margin",  f"₹{float(funds.get('availabelBalance', 0)):,.2f}")
-        fc2.metric("Used Margin",       f"₹{float(funds.get('utilizedAmount',   0)):,.2f}")
-        fc3.metric("Total Balance",     f"₹{float(funds.get('sodLimit',         0)):,.2f}")
-        fc4.metric("Unrealized P&L",    f"₹{float(funds.get('unrealizedProfit', 0)):,.2f}")
 
+# ══════════════════════════════════════════════════════════════════════════════
+# MAIN
+# ══════════════════════════════════════════════════════════════════════════════
+
+if run_btn:
+    # ── 1. Fetch Index OHLCV ─────────────────────────────────────────────────
+    with st.spinner(f"📡 Fetching {index_name} OHLCV from Dhan…"):
+        df = _fetcher.fetch_index_ohlcv(
+            idx_cfg["security_id"],
+            from_date.strftime("%Y-%m-%d"),
+            to_date.strftime("%Y-%m-%d"),
+            interval,
+            debug=debug_mode
+        )
+
+    if df is None or df.empty:
+        st.error("❌ No index data returned. Try: shorter date range, Daily timeframe, or refresh your token.")
+        st.stop()
+
+    st.success(f"✅ Loaded **{len(df):,} bars** for **{index_name}** ({interval_lbl})")
+
+    # ── 2. Indicators & Signals ───────────────────────────────────────────────
+    with st.spinner("⚙️ Computing indicators…"):
+        df["ema20"]   = ema(df["close"], 20)
+        df["ema50"]   = ema(df["close"], 50)
+        df["ema100"]  = ema(df["close"], 100)
+        df["ema200"]  = ema(df["close"], 200)
+        df["vol_sma"] = df["volume"].rolling(vol_period).mean()
+
+        # BSP Timeframe — Pine uses request.security(..., 'D', mf) by default
+        if use_daily_bsp and interval != "D":
+            with st.spinner("📅 Fetching Daily bars for BSP calculation (Pine-accurate)…"):
+                daily_df = _fetcher.fetch_index_ohlcv(
+                    idx_cfg["security_id"],
+                    from_date.strftime("%Y-%m-%d"),
+                    to_date.strftime("%Y-%m-%d"),
+                    interval="D",
+                    debug=False
+                )
+            df["bsp"] = calc_bsp_daily(df, daily_df, bsp_length)
+            st.caption("📅 BSP computed on **Daily** timeframe (matches TradingView Pine Script)")
+        else:
+            df["bsp"] = calc_bsp(df, bsp_length)
+
+        ph   = pivot_highs(df, pivot_length)
+        pl   = pivot_lows(df, pivot_length)
+        obs  = order_blocks(df, ph, pl, vol_threshold)
+        fvgs = fair_value_gaps(df)
+        df   = generate_signals(df, bsp_buy_lvl, bsp_sell_lvl, ema_filter=ema_filter, signal_mode=signal_mode)
+
+    # ── 2b. Signal Diagnostics ───────────────────────────────────────────────
+    total_bars   = len(df)
+    n_buy_sigs   = int((df["signal"] == 1).sum())
+    n_sell_sigs  = int((df["signal"] == -1).sum())
+    bsp_min      = round(float(df["bsp"].min()), 4)
+    bsp_max      = round(float(df["bsp"].max()), 4)
+
+    with st.expander("🔍 Signal Diagnostics", expanded=(n_buy_sigs == 0 and n_sell_sigs == 0)):
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("Total Bars",   f"{total_bars:,}")
+        c2.metric("Buy Signals",  n_buy_sigs,  delta=None if n_buy_sigs  > 0 else "⚠️ None")
+        c3.metric("Sell Signals", n_sell_sigs, delta=None if n_sell_sigs > 0 else "⚠️ None")
+        c4.metric("BSP Min",  bsp_min)
+        c5.metric("BSP Max",  bsp_max)
+
+        if n_buy_sigs == 0 and n_sell_sigs == 0:
+            st.warning(
+                f"**No signals generated.**\n\n"
+                f"BSP range on this data: **{bsp_min:.4f} → {bsp_max:.4f}**\n\n"
+                f"Your thresholds: Buy > **{bsp_buy_lvl}**, Sell < **{bsp_sell_lvl}**\n\n"
+                f"**Fix options (try in order):**\n"
+                f"1. Switch Signal Mode to **BSP Only** or **Level Hold** (sidebar)\n"
+                f"2. Loosen BSP levels — set Buy to **{round(bsp_max*0.6,3)}** and Sell to **{round(bsp_min*0.6,3)}**\n"
+                f"3. Uncheck **EMA Trend Filter**\n"
+                f"4. Increase BSP Length (longer smoothing)"
+            )
+            # Auto-suggest levels based on actual BSP range
+            suggested_buy  = round(bsp_max * 0.5, 3)
+            suggested_sell = round(bsp_min * 0.5, 3)
+            st.info(f"💡 Auto-suggested levels for this dataset: Buy **{suggested_buy}** / Sell **{suggested_sell}**")
+
+    # ── 3. Fetch Option Legs ─────────────────────────────────────────────────
+    leg_dfs = []   # one price-series df per leg, aligned to main df index
+    if trade_options:
+        fetch_interval = interval if interval != "D" else "25"
+        fd = from_date.strftime("%Y-%m-%d")
+        td = to_date.strftime("%Y-%m-%d")
+
+        for i, leg in enumerate(option_legs):
+            lbl = f"Leg {i+1}: {leg['direction']} {leg['lots']}L {leg['strike_lbl']} {leg['opt_type']}"
+            with st.spinner(f"📡 Fetching {lbl}…"):
+                raw = _fetcher.fetch_rolling_option(
+                    idx_cfg["security_id"],
+                    leg["offset"], leg["opt_type"],
+                    fd, td,
+                    interval=fetch_interval,
+                    expiry_flag=expiry_flag,
+                    debug=debug_mode
+                )
+
+            if raw is not None and not raw.empty:
+                st.success(f"✅ {lbl} — {len(raw):,} bars")
+                # Merge onto main df timestamps
+                leg_price = raw[["timestamp","close"]].rename(
+                    columns={"close": f"leg{i}_price"}
+                )
+                merged = pd.merge_asof(
+                    df[["timestamp"]].sort_values("timestamp"),
+                    leg_price.sort_values("timestamp"),
+                    on="timestamp", direction="nearest",
+                    tolerance=pd.Timedelta("30min")
+                )
+                leg_dfs.append({**leg, "prices": merged.set_index("timestamp")[f"leg{i}_price"]})
+            else:
+                st.warning(f"⚠️ {lbl} — no data, falling back to Black-Scholes simulation.")
+                # BS fallback for this leg
+                sim = simulate_option_prices(
+                    df, leg["offset"], strike_gap, leg["opt_type"], 7, 0.15
+                )
+                leg_dfs.append({**leg, "prices": sim.set_index("timestamp")["opt_price"]})
+
+        # Build combined spread price column on df:
+        # net_price = sum(signed_price per leg)
+        # BUY leg  → pay premium  → negative cash at entry, positive at exit
+        # SELL leg → receive prem → positive cash at entry, negative at exit
+        df = df.set_index("timestamp")
+        df["spread_price"] = 0.0
+        for ld in leg_dfs:
+            sign = 1 if ld["direction"] == "BUY" else -1
+            p    = ld["prices"].reindex(df.index).ffill().fillna(0)
+            df["spread_price"] += sign * p * ld["lots"]
+        df = df.reset_index()
+
+        # Legacy single-leg compat (used by chart subplot)
+        if leg_dfs:
+            df["opt_price"] = leg_dfs[0]["prices"].reindex(
+                df.set_index("timestamp").index
+            ).ffill().fillna(0).values
+
+    # ── 4. Run Backtest ───────────────────────────────────────────────────────
+    with st.spinner("📊 Running backtest…"):
+        results, trades = run_backtest(
+            df, init_capital, pos_size_pct / 100,
+            comm_pct / 100, lot_size, trade_options,
+            fixed_lots=fixed_lots,
+            spread_legs=leg_dfs if trade_options else None,
+            is_intraday=is_intraday,
+            eod_exit_time=eod_exit_time
+        )
+        m = metrics(results, trades, init_capital)
+
+    # ── 5. Mode Banner ────────────────────────────────────────────────────────
+    style_tag = "📅 MIS (Intraday)" if is_intraday else "📆 NRML (Carry Forward)"
+    eod_tag   = f" · EOD {eod_exit_time.strftime('%H:%M')}" if is_intraday and eod_exit_time else ""
+    if trade_options:
+        leg_summaries = " | ".join(
+            f"{lg['direction']} {lg['lots']}L {lg['strike_lbl']} {lg['opt_type']}"
+            for lg in option_legs
+        )
+        st.info(f"📌 **Options Mode** · {style_tag}{eod_tag} | {index_name} | {interval_lbl} | {leg_summaries} | {expiry_flag}")
+    else:
+        st.info(f"**{style_tag}**{eod_tag} · Index Mode | {index_name} | {interval_lbl} | Lot Size: {lot_size}")
+
+    # ── 4. KPIs ───────────────────────────────────────────────────────────────
+    st.markdown("### 📊 Performance")
+    k = st.columns(6)
+    k[0].metric("Total Return",  f"{m['total_return']:.1f}%",  delta=f"₹{m['total_pnl']:,.0f}")
+    k[1].metric("Profit Factor", f"{m['profit_factor']:.2f}")
+    k[2].metric("Win Rate",      f"{m['win_rate']:.1f}%")
+    k[3].metric("Max Drawdown",  f"{m['max_drawdown']:.1f}%",  delta_color="inverse")
+    k[4].metric("Total Trades",  str(m['total_trades']))
+    k[5].metric("Sharpe",        f"{m['sharpe']:.2f}")
     st.divider()
 
-    # Equity curve
-    eq_data = st.session_state["equity_curve"]
-    cur_cap  = st.session_state["current_capital"]
-    init_cap = st.session_state["initial_capital"]
-    total_ret= (cur_cap - init_cap) / init_cap * 100
+    # ── 5. Tabs ───────────────────────────────────────────────────────────────
+    tab1, tab2, tab3, tab4 = st.tabs(["📈 Chart", "📋 Trades", "📉 Equity & DD", "📑 Stats"])
 
-    ec1, ec2, ec3 = st.columns(3)
-    ec1.metric("Current Capital",  f"₹{cur_cap:,.2f}",
-               delta=f"{total_ret:+.2f}%",
-               delta_color="normal" if total_ret >= 0 else "inverse")
-    ec2.metric("Initial Capital",  f"₹{init_cap:,.2f}")
-    ec3.metric("Net P&L",          f"₹{cur_cap - init_cap:,.2f}")
+    # ─ Chart ──────────────────────────────────────────────────────────────────
+    with tab1:
+        rows   = 4 if trade_options else 3
+        h_rows = [0.50, 0.15, 0.17, 0.18] if trade_options else [0.60, 0.20, 0.20]
+        subs   = (["Price + SMC Levels", "Volume", "BSP Oscillator", f"Option Premium ({get_strike_label(strike_offset)} {opt_type})"]
+                  if trade_options else
+                  ["Price + SMC Levels", "Volume", "BSP Oscillator"])
 
-    if eq_data:
-        eq_df = pd.DataFrame(eq_data)
-        eq_df["timestamp"] = pd.to_datetime(eq_df["timestamp"])
-        eq_df["peak"]      = eq_df["equity"].cummax()
-        eq_df["dd_pct"]    = (eq_df["equity"] - eq_df["peak"]) / eq_df["peak"] * 100
+        fig = make_subplots(
+            rows=rows, cols=1, shared_xaxes=True,
+            row_heights=h_rows, vertical_spacing=0.025,
+            subplot_titles=subs
+        )
 
-        fig_eq = make_subplots(rows=2, cols=1, shared_xaxes=True,
-                               row_heights=[0.65,0.35], vertical_spacing=0.05,
-                               subplot_titles=["Equity Curve","Drawdown %"])
-        fig_eq.add_trace(go.Scatter(
-            x=eq_df["timestamp"], y=eq_df["equity"],
-            fill="tozeroy", name="Equity",
+        # Candles
+        fig.add_trace(go.Candlestick(
+            x=df["timestamp"], open=df["open"], high=df["high"],
+            low=df["low"], close=df["close"], name=index_name,
+            increasing_line_color="#00d4aa", decreasing_line_color="#ff4b6e"
+        ), row=1, col=1)
+
+        # EMAs
+        for show, col, name, color in [
+            (show_e20,  "ema20",  "EMA 20",  "#ff4b6e"),
+            (show_e50,  "ema50",  "EMA 50",  "#ff9900"),
+            (show_e100, "ema100", "EMA 100", "#00bcd4"),
+            (show_e200, "ema200", "EMA 200", "#3f8ef5"),
+        ]:
+            if show:
+                fig.add_trace(go.Scatter(x=df["timestamp"], y=df[col], name=name,
+                                          line=dict(color=color, width=1),
+                                          opacity=0.85), row=1, col=1)
+
+        # Order Blocks
+        for ob in obs[:60]:
+            fc = "rgba(255,75,110,0.10)" if ob["type"] == "bearish" else "rgba(0,212,170,0.10)"
+            bc = "#ff4b6e"              if ob["type"] == "bearish" else "#00d4aa"
+            x0 = df["timestamp"].iloc[ob["start"]]
+            x1 = df["timestamp"].iloc[min(ob["end"], len(df) - 1)]
+            fig.add_hrect(y0=ob["btm"], y1=ob["top"], x0=x0, x1=x1,
+                          fillcolor=fc, line_color=bc, line_width=0.5,
+                          annotation_text="OB★" if ob["strong"] else "OB",
+                          annotation_font_color=bc, annotation_font_size=8,
+                          row=1, col=1)
+
+        # FVGs
+        for fvg in fvgs[:40]:
+            x0 = df["timestamp"].iloc[fvg["start"]]
+            x1 = df["timestamp"].iloc[min(fvg["start"] + 15, len(df) - 1)]
+            fig.add_hrect(y0=fvg["btm"], y1=fvg["top"], x0=x0, x1=x1,
+                          fillcolor="rgba(150,0,255,0.09)",
+                          line_color="#9000ff", line_width=0.5,
+                          annotation_text="FVG",
+                          annotation_font_color="#b060ff", annotation_font_size=8,
+                          row=1, col=1)
+
+        # Signals
+        buys  = df[df["signal"] ==  1]
+        sells = df[df["signal"] == -1]
+        fig.add_trace(go.Scatter(x=buys["timestamp"],  y=buys["low"]  * 0.998,
+                                  mode="markers", name="BUY",
+                                  marker=dict(symbol="triangle-up",   size=9, color="#00d4aa")), row=1, col=1)
+        fig.add_trace(go.Scatter(x=sells["timestamp"], y=sells["high"] * 1.002,
+                                  mode="markers", name="EXIT",
+                                  marker=dict(symbol="triangle-down", size=9, color="#ff4b6e")), row=1, col=1)
+
+        # Volume
+        vcol = ["#00d4aa" if c >= o else "#ff4b6e"
+                for c, o in zip(df["close"], df["open"])]
+        fig.add_trace(go.Bar(x=df["timestamp"], y=df["volume"],
+                              name="Volume", marker_color=vcol, opacity=0.6), row=2, col=1)
+        fig.add_trace(go.Scatter(x=df["timestamp"], y=df["vol_sma"],
+                                  name="Vol SMA", line=dict(color="#ff9900", width=1)), row=2, col=1)
+
+        # BSP
+        bsp_col = ["#00d4aa" if v > 0 else "#ff4b6e" for v in df["bsp"].fillna(0)]
+        fig.add_trace(go.Bar(x=df["timestamp"], y=df["bsp"],
+                              name="BSP", marker_color=bsp_col, opacity=0.85), row=3, col=1)
+        fig.add_hline(y=bsp_buy_lvl,  line_color="#00d4aa", line_dash="dash", line_width=1, row=3, col=1)
+        fig.add_hline(y=bsp_sell_lvl, line_color="#ff4b6e", line_dash="dash", line_width=1, row=3, col=1)
+        fig.add_hline(y=0,            line_color="#444",    line_width=1,      row=3, col=1)
+
+        # Option Premium panel
+        if trade_options and "opt_price" in df.columns:
+            fig.add_trace(go.Scatter(
+                x=df["timestamp"], y=df["opt_price"],
+                name=f"{get_strike_label(strike_offset)} {opt_type}",
+                line=dict(color="#d966ff", width=1.5), fill="tozeroy",
+                fillcolor="rgba(150,0,255,0.08)"
+            ), row=4, col=1)
+            fig.add_trace(go.Scatter(
+                x=buys["timestamp"],  y=buys["opt_price"],
+                mode="markers", name="Buy Option",
+                marker=dict(symbol="triangle-up", size=9, color="#00d4aa")
+            ), row=4, col=1)
+            fig.add_trace(go.Scatter(
+                x=sells["timestamp"], y=sells["opt_price"],
+                mode="markers", name="Exit Option",
+                marker=dict(symbol="triangle-down", size=9, color="#ff4b6e")
+            ), row=4, col=1)
+
+        fig.update_layout(
+            height=900, template="plotly_dark", showlegend=True,
+            xaxis_rangeslider_visible=False,
+            paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
+            legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(size=10)),
+            margin=dict(t=35, b=20)
+        )
+        fig.update_xaxes(showgrid=True, gridcolor="#1e2130")
+        fig.update_yaxes(showgrid=True, gridcolor="#1e2130")
+        st.plotly_chart(fig, use_container_width=True)
+
+    # ─ Trades ─────────────────────────────────────────────────────────────────
+    with tab2:
+        st.markdown("#### Trade Log")
+        if trades:
+            tdf = pd.DataFrame(trades)
+
+            # Round core numeric columns to 2dp
+            for col in ["entry_price","exit_price","pnl","return_pct"]:
+                if col in tdf.columns:
+                    tdf[col] = tdf[col].round(2)
+
+            # Cumulative P&L
+            tdf["cum_pnl"] = tdf["pnl"].cumsum().round(2)
+
+            # Detect leg breakdown columns (leg1_ATM_CALL etc.)
+            leg_cols = [c for c in tdf.columns if c.startswith("leg") and "_" in c[3:]]
+
+            # Core columns always shown
+            base_cols = ["entry_time","exit_time","entry_price","exit_price",
+                         "qty","lots","pnl","cum_pnl","return_pct","exit_reason"]
+            # Insert leg breakdown after exit_price if present
+            all_cols = ["entry_time","exit_time","entry_price","exit_price",
+                        "qty","lots"] + leg_cols + ["pnl","cum_pnl","return_pct","exit_reason"]
+            all_cols = [c for c in all_cols if c in tdf.columns]
+
+            rename_map = {
+                "entry_time":  "Entry",   "exit_time":   "Exit",
+                "entry_price": "Net Entry ₹" if len(leg_cols) > 0 else "Entry ₹",
+                "exit_price":  "Net Exit ₹"  if len(leg_cols) > 0 else "Exit ₹",
+                "qty":         "Qty",     "lots":        "Scale Lots" if len(leg_cols) > 0 else "Lots",
+                "pnl":         "Net P&L ₹",  "cum_pnl":     "Cum. P&L ₹",
+                "return_pct":  "Return %",   "exit_reason": "Reason",
+            }
+            # Pretty-name leg columns: leg1_ATM+1_CALL → "L1 ATM+1 CE ₹"
+            for lc in leg_cols:
+                parts = lc.split("_", 1)
+                leg_num = parts[0].replace("leg", "L")
+                rest    = parts[1].replace("_CALL", " CE").replace("_PUT", " PE")
+                rename_map[lc] = f"{leg_num} {rest} ₹"
+
+            display = tdf[all_cols].rename(columns=rename_map)
+
+            # All float columns → 2dp format
+            float_cols = display.select_dtypes(include="number").columns.tolist()
+            fmt_dict   = {c: "{:.2f}" for c in float_cols}
+
+            # Color: green for positive, red for negative
+            color_cols = [rename_map.get("pnl","Net P&L ₹"),
+                          rename_map.get("cum_pnl","Cum. P&L ₹"),
+                          rename_map.get("return_pct","Return %")]
+            color_cols += [rename_map[lc] for lc in leg_cols if lc in rename_map]
+            color_cols  = [c for c in color_cols if c in display.columns]
+
+            styled = display.style.format(fmt_dict).applymap(
+                lambda v: ("color:#00d4aa" if isinstance(v,(int,float)) and v > 0
+                           else "color:#ff4b6e" if isinstance(v,(int,float)) and v < 0
+                           else ""),
+                subset=color_cols
+            )
+
+            st.dataframe(styled, use_container_width=True, height=500)
+
+            # Summary bar
+            total_pnl = tdf["pnl"].sum()
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Net P&L", f"₹{total_pnl:,.2f}",
+                      delta=f"{'▲' if total_pnl>0 else '▼'} {total_pnl/init_capital*100:.2f}%")
+            c2.metric("Trades",        len(tdf))
+            c3.metric("Avg P&L/Trade", f"₹{tdf['pnl'].mean():,.2f}")
+            c4.metric("Best Trade",    f"₹{tdf['pnl'].max():,.2f}")
+
+            # Leg-level P&L summary for spreads
+            if leg_cols:
+                st.markdown("##### 📊 Leg-wise P&L Summary")
+                leg_summary_cols = st.columns(len(leg_cols))
+                for j, lc in enumerate(leg_cols):
+                    nice = rename_map.get(lc, lc)
+                    total = tdf[lc].sum()
+                    leg_summary_cols[j].metric(nice, f"₹{total:,.2f}",
+                        delta=f"{'▲' if total>0 else '▼'}")
+
+            csv = tdf.to_csv(index=False)
+            st.download_button("⬇️ Download CSV", csv,
+                               f"{index_name}_trades.csv", "text/csv")
+        else:
+            st.info("No trades generated. Try adjusting BSP levels or timeframe.")
+
+    # ─ Equity & Drawdown ──────────────────────────────────────────────────────
+    with tab3:
+        fig2 = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                              row_heights=[0.65, 0.35], vertical_spacing=0.05,
+                              subplot_titles=("Equity Curve (₹)", "Drawdown (%)"))
+        fig2.add_trace(go.Scatter(
+            x=results["timestamp"], y=results["equity"],
+            name="Portfolio", fill="tozeroy",
             line=dict(color="#00d4aa", width=2),
             fillcolor="rgba(0,212,170,0.08)"
         ), row=1, col=1)
-        fig_eq.add_hline(y=init_cap, line_color="#555", line_dash="dash", row=1, col=1)
-        fig_eq.add_trace(go.Scatter(
-            x=eq_df["timestamp"], y=eq_df["dd_pct"],
-            fill="tozeroy", name="Drawdown",
-            line=dict(color="#ff4b6e", width=1.5),
-            fillcolor="rgba(255,75,110,0.1)"
+        fig2.add_hline(y=init_capital, line_color="#555", line_dash="dash", row=1, col=1)
+        fig2.add_trace(go.Scatter(
+            x=results["timestamp"], y=results["drawdown_pct"],
+            name="Drawdown", fill="tozeroy",
+            line=dict(color="#ff4b6e", width=1),
+            fillcolor="rgba(255,75,110,0.12)"
         ), row=2, col=1)
-        fig_eq.update_layout(
-            height=420, template="plotly_dark",
-            paper_bgcolor="#0a0d14", plot_bgcolor="#0a0d14",
-            margin=dict(t=30, b=10)
+        fig2.update_layout(
+            height=500, template="plotly_dark",
+            paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
+            margin=dict(t=35, b=20)
         )
-        st.plotly_chart(fig_eq, use_container_width=True)
-    else:
-        st.info("Equity curve will populate as trades close.")
+        fig2.update_xaxes(showgrid=True, gridcolor="#1e2130")
+        fig2.update_yaxes(showgrid=True, gridcolor="#1e2130")
+        st.plotly_chart(fig2, use_container_width=True)
 
-    # Risk metrics
-    tlog = st.session_state["trade_log"]
-    if tlog:
-        st.divider()
-        st.markdown("#### Risk Metrics")
-        pnls  = [t["pnl"] for t in tlog]
-        wins  = [p for p in pnls if p > 0]
-        losses= [p for p in pnls if p <= 0]
-        gp, gl = sum(wins), abs(sum(losses))
+    # ─ Stats ──────────────────────────────────────────────────────────────────
+    with tab4:
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("**Return Metrics**")
+            for k2, v in [
+                ("Total Return (%)",  f"{m['total_return']:.2f}%"),
+                ("Total P&L (₹)",     f"₹{m['total_pnl']:,.2f}"),
+                ("CAGR (%)",          f"{m['cagr']:.2f}%"),
+                ("Sharpe Ratio",      f"{m['sharpe']:.3f}"),
+                ("Sortino Ratio",     f"{m['sortino']:.3f}"),
+                ("Calmar Ratio",      f"{m['calmar']:.3f}"),
+            ]:
+                st.markdown(f"`{k2}` &nbsp; **{v}**")
+        with c2:
+            st.markdown("**Trade Metrics**")
+            for k2, v in [
+                ("Total Trades",     m["total_trades"]),
+                ("Win Rate (%)",     f"{m['win_rate']:.1f}%"),
+                ("Profit Factor",    f"{m['profit_factor']:.3f}"),
+                ("Avg Win (₹)",      f"₹{m['avg_win']:,.2f}"),
+                ("Avg Loss (₹)",     f"₹{m['avg_loss']:,.2f}"),
+                ("Max Drawdown (%)", f"{m['max_drawdown']:.2f}%"),
+            ]:
+                st.markdown(f"`{k2}` &nbsp; **{v}**")
 
-        rc1, rc2, rc3, rc4, rc5 = st.columns(5)
-        rc1.metric("Win Rate",      f"{len(wins)/len(pnls)*100:.1f}%")
-        rc2.metric("Profit Factor", f"{gp/gl:.2f}" if gl > 0 else "∞")
-        rc3.metric("Avg Win",       f"₹{np.mean(wins):,.2f}"   if wins   else "—")
-        rc4.metric("Avg Loss",      f"₹{np.mean(losses):,.2f}" if losses else "—")
-        rc5.metric("Largest Loss",  f"₹{min(pnls):,.2f}")
-
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 6 — CARRY FORWARD MANAGER
-# ══════════════════════════════════════════════════════════════════════════════
-with tab_carry:
-    st.markdown("### 📦 Carry Forward Manager")
-    st.info(
-        "Carry Forward (CNC/NRML) positions roll overnight — they are **not** auto-squared at EOD. "
-        "Manage them here or use the Kill Switch for emergency exit."
-    )
-
-    # Fetch Dhan holdings
-    c_col1, c_col2 = st.columns(2)
-    with c_col1:
-        if st.button("🔄 Load Holdings from Dhan") and token_ok:
-            holdings = api.get_holdings()
-            st.session_state["_holdings"] = holdings
-    with c_col2:
-        if st.button("🔄 Load Positions (F&O Carry)") and token_ok:
-            carry_pos = [p for p in api.get_positions()
-                         if p.get("productType") in ("CNC","NRML") and int(p.get("netQty",0)) != 0]
-            st.session_state["_carry_positions"] = carry_pos
-
-    # Holdings (equity)
-    holdings = st.session_state.get("_holdings", [])
-    if holdings:
-        st.markdown("#### Equity Holdings (Overnight)")
-        h_df = pd.DataFrame(holdings)
-        h_cols = [c for c in ["tradingSymbol","isin","totalQty","avgCostPrice",
-                                "lastTradedPrice","totalProfit","dpQty"] if c in h_df.columns]
-        if h_cols:
-            st.dataframe(h_df[h_cols].style.format(
-                {c: "{:.2f}" for c in ["avgCostPrice","lastTradedPrice","totalProfit"] if c in h_cols}
-            ), use_container_width=True)
-
-    # F&O carry positions
-    carry_pos = st.session_state.get("_carry_positions", [])
-    if carry_pos:
-        st.markdown("#### F&O Carry Positions (NRML)")
-        cp_df = pd.DataFrame(carry_pos)
-        cp_cols = [c for c in ["tradingSymbol","netQty","avgCostPrice","lastTradedPrice",
-                                 "unrealizedProfit","productType"] if c in cp_df.columns]
-        if cp_cols:
-            st.dataframe(cp_df[cp_cols], use_container_width=True)
-
-        # Per-position close button
-        for j, cp in enumerate(carry_pos):
-            sym   = cp.get("tradingSymbol", f"Position {j+1}")
-            qty   = int(cp.get("netQty", 0))
-            upnl  = float(cp.get("unrealizedProfit", 0))
-            side  = "SELL" if qty > 0 else "BUY"
-            upnl_color = "pnl-pos" if upnl >= 0 else "pnl-neg"
-            st.markdown(
-                f"**{sym}** | Qty: `{qty}` | "
-                f"<span class='{upnl_color}'>₹{upnl:,.2f}</span>",
-                unsafe_allow_html=True
+        if len(results) > 30:
+            st.markdown("#### Monthly Returns")
+            r2 = results.copy()
+            r2["month"] = r2["timestamp"].dt.to_period("M")
+            monthly = r2.groupby("month")["equity"].last().pct_change() * 100
+            monthly.index = monthly.index.astype(str)
+            monthly = monthly.dropna()
+            fig3 = go.Figure(go.Bar(
+                x=monthly.index, y=monthly.values,
+                marker_color=["#00d4aa" if v >= 0 else "#ff4b6e" for v in monthly.values],
+                text=[f"{v:.1f}%" for v in monthly.values],
+                textposition="outside", textfont=dict(size=9)
+            ))
+            fig3.update_layout(
+                height=280, template="plotly_dark",
+                paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
+                xaxis=dict(tickangle=-45), margin=dict(t=10, b=50),
+                yaxis_title="Return (%)"
             )
-            sq_col, _ = st.columns([1, 3])
-            with sq_col:
-                if st.button(f"Square Off {sym[:20]}", key=f"sq_carry_{j}"):
-                    order = {
-                        "dhanClientId":    cfg.client_id,
-                        "transactionType": side,
-                        "exchangeSegment": cp.get("exchangeSegment", "NSE_FNO"),
-                        "productType":     cp.get("productType", "NRML"),
-                        "orderType":       "MARKET",
-                        "validity":        "DAY",
-                        "securityId":      cp.get("securityId", ""),
-                        "quantity":        abs(qty),
-                        "price":           0,
-                        "triggerPrice":    0,
-                    }
-                    if not dry_run:
-                        resp = api.place_order(order)
-                        st.success(f"Square-off order placed: {resp.get('orderId','N/A')}")
-                    else:
-                        st.info(f"Paper mode — would place {side} {abs(qty)} {sym}")
+            st.plotly_chart(fig3, use_container_width=True)
 
-    if not holdings and not carry_pos:
-        st.info("Click **Load Holdings** or **Load Positions** to see carry forward data.")
-
-    # Manual add carry position
-    st.divider()
-    st.markdown("#### ➕ Manually Log a Carry Position")
-    with st.form("manual_carry"):
-        mc1, mc2, mc3, mc4 = st.columns(4)
-        m_sym    = mc1.text_input("Symbol",  placeholder="NIFTY24500CE")
-        m_qty    = mc2.number_input("Qty",   min_value=1, value=75)
-        m_price  = mc3.number_input("Entry ₹", min_value=0.0, value=0.0, format="%.2f")
-        m_side   = mc4.selectbox("Side", ["BUY","SELL"])
-        m_submit = st.form_submit_button("Log Position")
-        if m_submit and m_sym:
-            st.session_state["carry_positions"].append({
-                "symbol": m_sym, "qty": m_qty, "entry_price": m_price,
-                "side": m_side, "logged_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "product": "CNC"
-            })
-            st.success(f"Carry position logged: {m_side} {m_qty} {m_sym} @ ₹{m_price:.2f}")
-
-    if st.session_state["carry_positions"]:
-        st.markdown("#### Manually Logged Carry Positions")
-        st.dataframe(pd.DataFrame(st.session_state["carry_positions"]), use_container_width=True)
-
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 7 — SYSTEM LOG
-# ══════════════════════════════════════════════════════════════════════════════
-with tab_log:
-    st.markdown("### 🔧 System & Error Log")
-
-    col_l1, col_l2 = st.columns([1, 1])
-    with col_l1:
-        if st.button("🗑 Clear Log"):
-            st.session_state["error_log"] = []
-            st.rerun()
-    with col_l2:
-        st.metric("Signals Fired", st.session_state.get("signal_count", 0))
-
-    errors = st.session_state.get("error_log", [])
-    if errors:
-        st.markdown("**Error / Event Log:**")
-        for msg in reversed(errors[-50:]):
-            color = "red" if "error" in msg.lower() or "❌" in msg else "gray"
-            st.markdown(f"<small style='color:{color}'>{msg}</small>", unsafe_allow_html=True)
-    else:
-        st.success("✅ No errors logged.")
-
-    st.divider()
-    st.markdown("**Session State Summary:**")
-    summary = {
-        "algo_running":    st.session_state["algo_running"],
-        "algo_paused":     st.session_state["algo_paused"],
-        "open_positions":  len([p for p in st.session_state["positions"] if p["status"]=="OPEN"]),
-        "closed_positions":len([p for p in st.session_state["positions"] if p["status"]!="OPEN"]),
-        "total_orders":    len(st.session_state["orders"]),
-        "closed_trades":   len(st.session_state["trade_log"]),
-        "signals_fired":   st.session_state["signal_count"],
-        "current_capital": f"₹{st.session_state['current_capital']:,.2f}",
-        "last_refresh":    str(st.session_state.get("last_refresh","—")),
-        "dry_run":         dry_run,
-        "product_type":    product_type,
-    }
-    st.json(summary)
-
-# ══════════════════════════════════════════════════════════════════════════════
-# AUTO-REFRESH (when algo running)
-# ══════════════════════════════════════════════════════════════════════════════
-if st.session_state["algo_running"] and not st.session_state["algo_paused"]:
-    time.sleep(0.5)
-    st.rerun()
+else:
+    st.markdown("""
+    <div style="text-align:center; padding:60px 20px; opacity:0.65;">
+        <h2>📡 SMC Liquidity Lens — Index Backtester</h2>
+        <p style="font-size:1.05rem;">
+            Paste your <b>Dhan Access Token</b>, select an <b>Index</b> and <b>Strike</b>,
+            then click <b>Run Backtest</b>.
+        </p>
+        <br>
+        <table style="margin:auto; font-size:0.9rem; border-collapse:collapse; line-height:2.2;">
+            <tr>
+                <td style="padding:4px 20px;">✅ NIFTY · BANKNIFTY · FINNIFTY · MIDCPNIFTY</td>
+                <td style="padding:4px 20px;">✅ SENSEX · BANKEX</td>
+            </tr>
+            <tr>
+                <td style="padding:4px 20px;">✅ Index Futures-style Backtest</td>
+                <td style="padding:4px 20px;">✅ Options: ATM-3 → ATM → ATM+3</td>
+            </tr>
+            <tr>
+                <td style="padding:4px 20px;">✅ BSP + SMC Order Blocks + FVG</td>
+                <td style="padding:4px 20px;">✅ Sharpe · Sortino · Calmar · CAGR</td>
+            </tr>
+        </table>
+    </div>
+    """, unsafe_allow_html=True)
