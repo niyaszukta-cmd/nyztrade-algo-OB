@@ -1,7 +1,7 @@
-streamlit==1.35.0
-pandas==2.2.2
-numpy==1.26.4
-plotly==5.22.0
-requests==2.32.5
-APScheduler==3.10.4
-tzdata==2024.1
+streamlit
+pandas
+numpy
+plotly
+requests
+APScheduler
+tzdata
